@@ -21,10 +21,14 @@ Running the code might require compiling the cffi code. This requires running cf
 ```python
     import adi
     f = adi.read_file(r'C:\Users\RNEL\Desktop\test\test_file.adicht')
+    # All id numbering is 1 based, first channel, first block
+    # When indexing in Python we need to shift by 1 for 0 based indexing
+    # Functions however respect the 1 based notation ...
+    
+    # These may vary for your file ...
     channel_id = 2
-    c = f.channels[channel_id-1]
     record_id = 1
-    data = f.channels[1].get_data(record_id)
+    data = f.channels[channel_id-1].get_data(record_id)
     import matplotlib.pyplot as plt
     plt.plot(data)
     plt.show()
