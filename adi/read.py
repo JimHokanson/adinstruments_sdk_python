@@ -1,11 +1,12 @@
-# -*- coding: utf-8 -*-
 
+from datetime import datetime, timedelta
+
+#This is used only for returning the loaded data
 import numpy as np
 
-def test():
+r"""
+    #Test Code:
     import adi
-    #TODO: Why was this causing an error when in a block string?
-    #   => unicode error? It's just a comment
     f = adi.read_file(r'C:\Users\RNEL\Desktop\test\test_file.adicht')
     channel_id = 2
     c = f.channels[channel_id-1]
@@ -14,11 +15,14 @@ def test():
     import matplotlib.pyplot as plt
     plt.plot(data)
     plt.show()
+"""
 
 from adi._adi_cffi import ffi, lib
 
-
 def read_file(file_path):
+    """
+    This is the preferred entry point for working with this module.
+    """
     return File(file_path)
 
 def print_object(obj):
@@ -190,11 +194,52 @@ class Channel():
     def __repr__(self):
         return print_object(self)         
 
+
+class RecordTime():
+    
+    """
+    Apparently it is possible to trigger data collection before or after a trigger signal.
+    
+    Datetimes for both the trigger and data start are properties of this class.
+    """
+    def __init__(self,tick_dt,trig_time,frac_secs,trig_minus_start_ticks):
+        
+        self.trig_datetime = datetime.utcfromtimestamp(trig_time) + timedelta(seconds = frac_secs)
+        self.trig_start_delta = trig_minus_start_ticks
+        self.trig_datestr = self.trig_datetime.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip('0')
+    
+        delta = timedelta(seconds = abs(trig_minus_start_ticks*tick_dt))
+        
+        if trig_minus_start_ticks > 0:
+            self.rec_datetime = self.trig_datetime + delta
+        else:
+            self.rec_datetime = self.trig_datetime - delta;
+        
+        self.rec_datestr = self.rec_datetime.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip('0')
+        
+        #+ve - trigger before block
+        #-ve - trigger after block
+    
+    def __repr__(self):
+        return print_object(self)   
+
 class Record():
     
+    """
+    Attributes
+    ----------
+    n_ticks :
+        # of samples in the record for the channel sampled at the highest rate
+    tick_dt :
+        Time between "ticks"
+    comments : Comment
+    
+    """
     def __init__(self,h,record_id):
         
         """
+        h : 
+            Handle to the underlying file pointer
         sdk : SDK
         record_id : int?
             1 based record
@@ -205,10 +250,9 @@ class Record():
         
         self.n_ticks = SDK.get_n_ticks_in_record(self.h,record_id)
         
-        #Not actually channel specific, channel is ignored
-        #Hard code in "first channel"
+        #Not actually channel specific, channel is ignored (according to ADI)
+        #Hard coded in "first channel" => 1
         self.tick_dt = SDK.get_tick_period(self.h,record_id,1)
-        
         
         self.comments = SDK.get_all_comments(self.h,record_id)
         
@@ -216,7 +260,7 @@ class Record():
             c._add_info(self.tick_dt)
             
             
-        #TODO: Get record start time    
+        self.record_time = SDK.get_record_time_info(self.h,record_id,self.tick_dt) 
 
     def __repr__(self):
         return print_object(self)            
@@ -269,6 +313,23 @@ class SDK():
             #TODO: Add more 
             raise Exception('Error opening file for reading')
     
+    """
+    ============================   Record    ============================
+    """   
+    
+    @staticmethod
+    def get_record_time_info(h,record_id,tick_dt):
+        trig_time = ffi.new("time_t *")
+        frac_secs = ffi.new("double *")
+        trigger_minus_rec_start = ffi.new("long *")
+        result = lib.ADI_GetRecordTime(h[0],record_id-1,trig_time,frac_secs,trigger_minus_rec_start)
+        if result == 0:
+            return RecordTime(tick_dt,trig_time[0],frac_secs[0],trigger_minus_rec_start[0])
+        else:
+            #TODO: Improve message
+            raise Exception('Error getting # of ticks in record')
+    
+    
     @staticmethod
     def get_n_ticks_in_record(h,record_id):
         n_ticks = ffi.new("long *")
@@ -278,7 +339,6 @@ class SDK():
         else:
             #TODO: Improve message
             raise Exception('Error getting # of ticks in record')
-    
 
     """
     ============================   Channel    ============================
