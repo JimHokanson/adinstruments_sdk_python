@@ -1,8 +1,13 @@
 
+import inspect
 from datetime import datetime, timedelta
 
 #This is used only for returning the loaded data
 import numpy as np
+
+#Note apparently pylint doesn't like this because it is from a dll (.pyd file)
+#https://stackoverflow.com/questions/28437071/pylint-1-4-reports-e1101no-member-on-all-c-extensions
+from adi._adi_cffi import ffi, lib
 
 r"""
     #Test Code:
@@ -16,8 +21,6 @@ r"""
     plt.plot(data)
     plt.show()
 """
-
-from adi._adi_cffi import ffi, lib
 
 def read_file(file_path):
     """
@@ -294,7 +297,7 @@ class File():
     def __del__(self):
         #print("object deleted")
         if self.file_loaded:
-            self.sdk.close_file(self.h)
+            SDK.close_file(self.h)
 
     def __repr__(self):
         return print_object(self)
