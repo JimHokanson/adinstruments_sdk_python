@@ -15,6 +15,24 @@ https://cffi.readthedocs.io/en/latest/
 
 Running the code might require compiling the cffi code. This requires running cffi_build.py in the adi package. This might require installing cffi as well as some version of Visual Studio. The currently released code was compiled for Python 3.6 on Visual Studio 2015 or 2017 (not sure which)
 
+For upgrading to 3.7 I installed Python 3.7. Within the interpreter I ran the following
+
+```python
+import subprocess
+import sys
+
+#https://stackoverflow.com/questions/12332975/installing-python-module-within-code
+def install(package):
+    subprocess.call([sys.executable, "-m", "pip", "install", package])
+	
+install("cffi")
+
+import os
+#This would need to be changed based on where you keep the code
+os.chdir('G:/repos/python/adinstruments_sdk_python/adi')
+
+exec(open("cffi_build.py").read())
+```
 
 # Test code #
 
