@@ -8,20 +8,49 @@
    the same works for the other two macros.  Py_DEBUG implies them,
    but not the other way around.
 
-   Issue #350 is still open: on Windows, the code here causes it to link
-   with PYTHON36.DLL (for example) instead of PYTHON3.DLL.  A fix was
-   attempted in 164e526a5515 and 14ce6985e1c3, but reverted: virtualenv
-   does not make PYTHON3.DLL available, and so the "correctly" compiled
-   version would not run inside a virtualenv.  We will re-apply the fix
-   after virtualenv has been fixed for some time.  For explanation, see
-   issue #355.  For a workaround if you want PYTHON3.DLL and don't worry
-   about virtualenv, see issue #350.  See also 'py_limited_api' in
-   setuptools_ext.py.
+   The implementation is messy (issue #350): on Windows, with _MSC_VER,
+   we have to define Py_LIMITED_API even before including pyconfig.h.
+   In that case, we guess what pyconfig.h will do to the macros above,
+   and check our guess after the #include.
+
+   Note that on Windows, with CPython 3.x, you need >= 3.5 and virtualenv
+   version >= 16.0.0.  With older versions of either, you don't get a
+   copy of PYTHON3.DLL in the virtualenv.  We can't check the version of
+   CPython *before* we even include pyconfig.h.  ffi.set_source() puts
+   a ``#define _CFFI_NO_LIMITED_API'' at the start of this file if it is
+   running on Windows < 3.5, as an attempt at fixing it, but that's
+   arguably wrong because it may not be the target version of Python.
+   Still better than nothing I guess.  As another workaround, you can
+   remove the definition of Py_LIMITED_API here.
+
+   See also 'py_limited_api' in cffi/setuptools_ext.py.
 */
 #if !defined(_CFFI_USE_EMBEDDING) && !defined(Py_LIMITED_API)
-#  include <pyconfig.h>
-#  if !defined(Py_DEBUG) && !defined(Py_TRACE_REFS) && !defined(Py_REF_DEBUG)
-#    define Py_LIMITED_API
+#  ifdef _MSC_VER
+#    if !defined(_DEBUG) && !defined(Py_DEBUG) && !defined(Py_TRACE_REFS) && !defined(Py_REF_DEBUG) && !defined(_CFFI_NO_LIMITED_API)
+#      define Py_LIMITED_API
+#    endif
+#    include <pyconfig.h>
+     /* sanity-check: Py_LIMITED_API will cause crashes if any of these
+        are also defined.  Normally, the Python file PC/pyconfig.h does not
+        cause any of these to be defined, with the exception that _DEBUG
+        causes Py_DEBUG.  Double-check that. */
+#    ifdef Py_LIMITED_API
+#      if defined(Py_DEBUG)
+#        error "pyconfig.h unexpectedly defines Py_DEBUG, but Py_LIMITED_API is set"
+#      endif
+#      if defined(Py_TRACE_REFS)
+#        error "pyconfig.h unexpectedly defines Py_TRACE_REFS, but Py_LIMITED_API is set"
+#      endif
+#      if defined(Py_REF_DEBUG)
+#        error "pyconfig.h unexpectedly defines Py_REF_DEBUG, but Py_LIMITED_API is set"
+#      endif
+#    endif
+#  else
+#    include <pyconfig.h>
+#    if !defined(Py_DEBUG) && !defined(Py_TRACE_REFS) && !defined(Py_REF_DEBUG) && !defined(_CFFI_NO_LIMITED_API)
+#      define Py_LIMITED_API
+#    endif
 #  endif
 #endif
 
@@ -441,14 +470,62 @@ _CFFI_UNUSED_FN static int _cffi_to_c_char32_t(PyObject *o)
         return (int)_cffi_to_c_wchar3216_t(o);
 }
 
-_CFFI_UNUSED_FN static PyObject *_cffi_from_c_char32_t(int x)
+_CFFI_UNUSED_FN static PyObject *_cffi_from_c_char32_t(unsigned int x)
 {
     if (sizeof(_cffi_wchar_t) == 4)
         return _cffi_from_c_wchar_t((_cffi_wchar_t)x);
     else
-        return _cffi_from_c_wchar3216_t(x);
+        return _cffi_from_c_wchar3216_t((int)x);
 }
 
+union _cffi_union_alignment_u {
+    unsigned char m_char;
+    unsigned short m_short;
+    unsigned int m_int;
+    unsigned long m_long;
+    unsigned long long m_longlong;
+    float m_float;
+    double m_double;
+    long double m_longdouble;
+};
+
+struct _cffi_freeme_s {
+    struct _cffi_freeme_s *next;
+    union _cffi_union_alignment_u alignment;
+};
+
+_CFFI_UNUSED_FN static int
+_cffi_convert_array_argument(struct _cffi_ctypedescr *ctptr, PyObject *arg,
+                             char **output_data, Py_ssize_t datasize,
+                             struct _cffi_freeme_s **freeme)
+{
+    char *p;
+    if (datasize < 0)
+        return -1;
+
+    p = *output_data;
+    if (p == NULL) {
+        struct _cffi_freeme_s *fp = (struct _cffi_freeme_s *)PyObject_Malloc(
+            offsetof(struct _cffi_freeme_s, alignment) + (size_t)datasize);
+        if (fp == NULL)
+            return -1;
+        fp->next = *freeme;
+        *freeme = fp;
+        p = *output_data = (char *)&fp->alignment;
+    }
+    memset((void *)p, 0, (size_t)datasize);
+    return _cffi_convert_array_from_object(p, ctptr, arg);
+}
+
+_CFFI_UNUSED_FN static void
+_cffi_free_array_arguments(struct _cffi_freeme_s *freeme)
+{
+    do {
+        void *p = (void *)freeme;
+        freeme = freeme->next;
+        PyObject_Free(p);
+    } while (freeme != NULL);
+}
 
 /**********  end CPython-specific section  **********/
 #else
@@ -496,94 +573,99 @@ static void (*_cffi_call_python_org)(struct _cffi_externpy_s *, char *);
 /************************************************************/
 
 static void *_cffi_types[] = {
-/*  0 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_CommentsHandle__ * *)
-/*  1 */ _CFFI_OP(_CFFI_OP_POINTER, 4), // struct ADI_CommentsHandle__ * *
-/*  2 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/*  3 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_CommentsHandle__ *)
-/*  4 */ _CFFI_OP(_CFFI_OP_POINTER, 85), // struct ADI_CommentsHandle__ *
+/*  0 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(ADIResultCode, wchar_t *, long, long *)
+/*  1 */ _CFFI_OP(_CFFI_OP_ENUM, 2), // ADIResultCode
+/*  2 */ _CFFI_OP(_CFFI_OP_POINTER, 92), // wchar_t *
+/*  3 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9), // long
+/*  4 */ _CFFI_OP(_CFFI_OP_POINTER, 3), // long *
 /*  5 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/*  6 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_CommentsHandle__ *, long *, long *, long *, wchar_t *, long, long *)
-/*  7 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
-/*  8 */ _CFFI_OP(_CFFI_OP_POINTER, 12), // long *
-/*  9 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 10 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 11 */ _CFFI_OP(_CFFI_OP_POINTER, 87), // wchar_t *
-/* 12 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9), // long
-/* 13 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 14 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 15 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ * *)
-/* 16 */ _CFFI_OP(_CFFI_OP_POINTER, 19), // struct ADI_FileHandle__ * *
-/* 17 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 18 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ *, long *)
-/* 19 */ _CFFI_OP(_CFFI_OP_POINTER, 86), // struct ADI_FileHandle__ *
-/* 20 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 21 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 22 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ *, long, long *)
-/* 23 */ _CFFI_OP(_CFFI_OP_NOOP, 19),
-/* 24 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 25 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 26 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 27 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ *, long, long *, double *, long *)
-/* 28 */ _CFFI_OP(_CFFI_OP_NOOP, 19),
-/* 29 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 30 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 31 */ _CFFI_OP(_CFFI_OP_POINTER, 82), // double *
-/* 32 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 33 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 34 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ *, long, long, double *)
-/* 35 */ _CFFI_OP(_CFFI_OP_NOOP, 19),
-/* 36 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 37 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 38 */ _CFFI_OP(_CFFI_OP_NOOP, 31),
+/*  6 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_CommentsHandle__ * *)
+/*  7 */ _CFFI_OP(_CFFI_OP_POINTER, 10), // struct ADI_CommentsHandle__ * *
+/*  8 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/*  9 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_CommentsHandle__ *)
+/* 10 */ _CFFI_OP(_CFFI_OP_POINTER, 90), // struct ADI_CommentsHandle__ *
+/* 11 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 12 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_CommentsHandle__ *, long *, long *, long *, wchar_t *, long, long *)
+/* 13 */ _CFFI_OP(_CFFI_OP_NOOP, 10),
+/* 14 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 15 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 16 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 17 */ _CFFI_OP(_CFFI_OP_NOOP, 2),
+/* 18 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 19 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 20 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 21 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ * *)
+/* 22 */ _CFFI_OP(_CFFI_OP_POINTER, 25), // struct ADI_FileHandle__ * *
+/* 23 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 24 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ *, long *)
+/* 25 */ _CFFI_OP(_CFFI_OP_POINTER, 91), // struct ADI_FileHandle__ *
+/* 26 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 27 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 28 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ *, long, long *)
+/* 29 */ _CFFI_OP(_CFFI_OP_NOOP, 25),
+/* 30 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 31 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 32 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 33 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ *, long, long *, double *, long *)
+/* 34 */ _CFFI_OP(_CFFI_OP_NOOP, 25),
+/* 35 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 36 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 37 */ _CFFI_OP(_CFFI_OP_POINTER, 87), // double *
+/* 38 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
 /* 39 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 40 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ *, long, long, long *)
-/* 41 */ _CFFI_OP(_CFFI_OP_NOOP, 19),
+/* 40 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ *, long, long, double *)
+/* 41 */ _CFFI_OP(_CFFI_OP_NOOP, 25),
 /* 42 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
 /* 43 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 44 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
+/* 44 */ _CFFI_OP(_CFFI_OP_NOOP, 37),
 /* 45 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 46 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ *, long, long, long, ADICDataFlags, long, float *, long *)
-/* 47 */ _CFFI_OP(_CFFI_OP_NOOP, 19),
+/* 46 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ *, long, long, long *)
+/* 47 */ _CFFI_OP(_CFFI_OP_NOOP, 25),
 /* 48 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
 /* 49 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 50 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 51 */ _CFFI_OP(_CFFI_OP_ENUM, 0), // ADICDataFlags
-/* 52 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 53 */ _CFFI_OP(_CFFI_OP_POINTER, 83), // float *
-/* 54 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 55 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 56 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ *, long, long, wchar_t *, long, long *)
-/* 57 */ _CFFI_OP(_CFFI_OP_NOOP, 19),
+/* 50 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 51 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 52 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ *, long, long, long, ADICDataFlags, long, float *, long *)
+/* 53 */ _CFFI_OP(_CFFI_OP_NOOP, 25),
+/* 54 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 55 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 56 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 57 */ _CFFI_OP(_CFFI_OP_ENUM, 0), // ADICDataFlags
 /* 58 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 59 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 60 */ _CFFI_OP(_CFFI_OP_NOOP, 11),
-/* 61 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 62 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 63 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 64 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ *, long, struct ADI_CommentsHandle__ * *)
-/* 65 */ _CFFI_OP(_CFFI_OP_NOOP, 19),
-/* 66 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 67 */ _CFFI_OP(_CFFI_OP_NOOP, 1),
-/* 68 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 69 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(struct ADI_FileHandle__ *, long, wchar_t *, long, long *)
-/* 70 */ _CFFI_OP(_CFFI_OP_NOOP, 19),
-/* 71 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 72 */ _CFFI_OP(_CFFI_OP_NOOP, 11),
-/* 73 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
-/* 74 */ _CFFI_OP(_CFFI_OP_NOOP, 8),
-/* 75 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 76 */ _CFFI_OP(_CFFI_OP_FUNCTION, 81), // ADIResultCode()(wchar_t const *, struct ADI_FileHandle__ * *, ADIFileOpenMode)
-/* 77 */ _CFFI_OP(_CFFI_OP_POINTER, 87), // wchar_t const *
-/* 78 */ _CFFI_OP(_CFFI_OP_NOOP, 16),
-/* 79 */ _CFFI_OP(_CFFI_OP_ENUM, 1), // ADIFileOpenMode
-/* 80 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
-/* 81 */ _CFFI_OP(_CFFI_OP_ENUM, 2), // ADIResultCode
-/* 82 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 14), // double
-/* 83 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 13), // float
-/* 84 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 7), // int
-/* 85 */ _CFFI_OP(_CFFI_OP_STRUCT_UNION, 0), // struct ADI_CommentsHandle__
-/* 86 */ _CFFI_OP(_CFFI_OP_STRUCT_UNION, 1), // struct ADI_FileHandle__
-/* 87 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 16), // wchar_t
+/* 59 */ _CFFI_OP(_CFFI_OP_POINTER, 88), // float *
+/* 60 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 61 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 62 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ *, long, long, wchar_t *, long, long *)
+/* 63 */ _CFFI_OP(_CFFI_OP_NOOP, 25),
+/* 64 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 65 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 66 */ _CFFI_OP(_CFFI_OP_NOOP, 2),
+/* 67 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 68 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 69 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 70 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ *, long, struct ADI_CommentsHandle__ * *)
+/* 71 */ _CFFI_OP(_CFFI_OP_NOOP, 25),
+/* 72 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 73 */ _CFFI_OP(_CFFI_OP_NOOP, 7),
+/* 74 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 75 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(struct ADI_FileHandle__ *, long, wchar_t *, long, long *)
+/* 76 */ _CFFI_OP(_CFFI_OP_NOOP, 25),
+/* 77 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 78 */ _CFFI_OP(_CFFI_OP_NOOP, 2),
+/* 79 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 9),
+/* 80 */ _CFFI_OP(_CFFI_OP_NOOP, 4),
+/* 81 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 82 */ _CFFI_OP(_CFFI_OP_FUNCTION, 1), // ADIResultCode()(wchar_t const *, struct ADI_FileHandle__ * *, ADIFileOpenMode)
+/* 83 */ _CFFI_OP(_CFFI_OP_POINTER, 92), // wchar_t const *
+/* 84 */ _CFFI_OP(_CFFI_OP_NOOP, 22),
+/* 85 */ _CFFI_OP(_CFFI_OP_ENUM, 1), // ADIFileOpenMode
+/* 86 */ _CFFI_OP(_CFFI_OP_FUNCTION_END, 0),
+/* 87 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 14), // double
+/* 88 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 13), // float
+/* 89 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 7), // int
+/* 90 */ _CFFI_OP(_CFFI_OP_STRUCT_UNION, 0), // struct ADI_CommentsHandle__
+/* 91 */ _CFFI_OP(_CFFI_OP_STRUCT_UNION, 1), // struct ADI_FileHandle__
+/* 92 */ _CFFI_OP(_CFFI_OP_PRIMITIVE, 16), // wchar_t
 };
 
 static int _cffi_const_kADICDataAtSampleRate(unsigned long long *o)
@@ -715,16 +797,16 @@ _cffi_f_ADI_CloseCommentsAccessor(PyObject *self, PyObject *arg0)
 {
   struct ADI_CommentsHandle__ * * x0;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(1), arg0, (char **)&x0);
+      _cffi_type(7), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_CommentsHandle__ * *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(1), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_CommentsHandle__ * *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(7), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -735,7 +817,9 @@ _cffi_f_ADI_CloseCommentsAccessor(PyObject *self, PyObject *arg0)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_CloseCommentsAccessor _cffi_d_ADI_CloseCommentsAccessor
@@ -751,16 +835,16 @@ _cffi_f_ADI_CloseFile(PyObject *self, PyObject *arg0)
 {
   struct ADI_FileHandle__ * * x0;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(16), arg0, (char **)&x0);
+      _cffi_type(22), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ * *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(16), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ * *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(22), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -771,7 +855,9 @@ _cffi_f_ADI_CloseFile(PyObject *self, PyObject *arg0)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_CloseFile _cffi_d_ADI_CloseFile
@@ -789,7 +875,9 @@ _cffi_f_ADI_CreateCommentsAccessor(PyObject *self, PyObject *args)
   long x1;
   struct ADI_CommentsHandle__ * * x2;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -798,13 +886,11 @@ _cffi_f_ADI_CreateCommentsAccessor(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -813,13 +899,11 @@ _cffi_f_ADI_CreateCommentsAccessor(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(1), arg2, (char **)&x2);
+      _cffi_type(7), arg2, (char **)&x2);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x2 = (struct ADI_CommentsHandle__ * *)alloca((size_t)datasize);
-    memset((void *)x2, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x2, _cffi_type(1), arg2) < 0)
+    x2 = ((size_t)datasize) <= 640 ? (struct ADI_CommentsHandle__ * *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(7), arg2, (char **)&x2,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -830,7 +914,9 @@ _cffi_f_ADI_CreateCommentsAccessor(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_CreateCommentsAccessor _cffi_d_ADI_CreateCommentsAccessor
@@ -850,7 +936,9 @@ _cffi_f_ADI_GetChannelName(PyObject *self, PyObject *args)
   long x3;
   long * x4;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -861,13 +949,11 @@ _cffi_f_ADI_GetChannelName(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -876,13 +962,11 @@ _cffi_f_ADI_GetChannelName(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(11), arg2, (char **)&x2);
+      _cffi_type(2), arg2, (char **)&x2);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x2 = (wchar_t *)alloca((size_t)datasize);
-    memset((void *)x2, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x2, _cffi_type(11), arg2) < 0)
+    x2 = ((size_t)datasize) <= 640 ? (wchar_t *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(2), arg2, (char **)&x2,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -891,13 +975,11 @@ _cffi_f_ADI_GetChannelName(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg4, (char **)&x4);
+      _cffi_type(4), arg4, (char **)&x4);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x4 = (long *)alloca((size_t)datasize);
-    memset((void *)x4, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x4, _cffi_type(8), arg4) < 0)
+    x4 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg4, (char **)&x4,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -908,7 +990,9 @@ _cffi_f_ADI_GetChannelName(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetChannelName _cffi_d_ADI_GetChannelName
@@ -930,7 +1014,9 @@ _cffi_f_ADI_GetCommentInfo(PyObject *self, PyObject *args)
   long x5;
   long * x6;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -943,57 +1029,47 @@ _cffi_f_ADI_GetCommentInfo(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(4), arg0, (char **)&x0);
+      _cffi_type(10), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_CommentsHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(4), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_CommentsHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(10), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg1, (char **)&x1);
+      _cffi_type(4), arg1, (char **)&x1);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x1 = (long *)alloca((size_t)datasize);
-    memset((void *)x1, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x1, _cffi_type(8), arg1) < 0)
+    x1 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg1, (char **)&x1,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg2, (char **)&x2);
+      _cffi_type(4), arg2, (char **)&x2);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x2 = (long *)alloca((size_t)datasize);
-    memset((void *)x2, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x2, _cffi_type(8), arg2) < 0)
+    x2 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg2, (char **)&x2,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg3, (char **)&x3);
+      _cffi_type(4), arg3, (char **)&x3);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x3 = (long *)alloca((size_t)datasize);
-    memset((void *)x3, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x3, _cffi_type(8), arg3) < 0)
+    x3 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg3, (char **)&x3,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(11), arg4, (char **)&x4);
+      _cffi_type(2), arg4, (char **)&x4);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x4 = (wchar_t *)alloca((size_t)datasize);
-    memset((void *)x4, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x4, _cffi_type(11), arg4) < 0)
+    x4 = ((size_t)datasize) <= 640 ? (wchar_t *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(2), arg4, (char **)&x4,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1002,13 +1078,11 @@ _cffi_f_ADI_GetCommentInfo(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg6, (char **)&x6);
+      _cffi_type(4), arg6, (char **)&x6);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x6 = (long *)alloca((size_t)datasize);
-    memset((void *)x6, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x6, _cffi_type(8), arg6) < 0)
+    x6 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg6, (char **)&x6,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1019,10 +1093,76 @@ _cffi_f_ADI_GetCommentInfo(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetCommentInfo _cffi_d_ADI_GetCommentInfo
+#endif
+
+static ADIResultCode _cffi_d_ADI_GetErrorMessage(ADIResultCode x0, wchar_t * x1, long x2, long * x3)
+{
+  return ADI_GetErrorMessage(x0, x1, x2, x3);
+}
+#ifndef PYPY_VERSION
+static PyObject *
+_cffi_f_ADI_GetErrorMessage(PyObject *self, PyObject *args)
+{
+  ADIResultCode x0;
+  wchar_t * x1;
+  long x2;
+  long * x3;
+  Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
+  ADIResultCode result;
+  PyObject *pyresult;
+  PyObject *arg0;
+  PyObject *arg1;
+  PyObject *arg2;
+  PyObject *arg3;
+
+  if (!PyArg_UnpackTuple(args, "ADI_GetErrorMessage", 4, 4, &arg0, &arg1, &arg2, &arg3))
+    return NULL;
+
+  if (_cffi_to_c((char *)&x0, _cffi_type(1), arg0) < 0)
+    return NULL;
+
+  datasize = _cffi_prepare_pointer_call_argument(
+      _cffi_type(2), arg1, (char **)&x1);
+  if (datasize != 0) {
+    x1 = ((size_t)datasize) <= 640 ? (wchar_t *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(2), arg1, (char **)&x1,
+            datasize, &large_args_free) < 0)
+      return NULL;
+  }
+
+  x2 = _cffi_to_c_int(arg2, long);
+  if (x2 == (long)-1 && PyErr_Occurred())
+    return NULL;
+
+  datasize = _cffi_prepare_pointer_call_argument(
+      _cffi_type(4), arg3, (char **)&x3);
+  if (datasize != 0) {
+    x3 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg3, (char **)&x3,
+            datasize, &large_args_free) < 0)
+      return NULL;
+  }
+
+  Py_BEGIN_ALLOW_THREADS
+  _cffi_restore_errno();
+  { result = ADI_GetErrorMessage(x0, x1, x2, x3); }
+  _cffi_save_errno();
+  Py_END_ALLOW_THREADS
+
+  (void)self; /* unused */
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
+}
+#else
+#  define _cffi_f_ADI_GetErrorMessage _cffi_d_ADI_GetErrorMessage
 #endif
 
 static ADIResultCode _cffi_d_ADI_GetNumSamplesInRecord(struct ADI_FileHandle__ * x0, long x1, long x2, long * x3)
@@ -1038,7 +1178,9 @@ _cffi_f_ADI_GetNumSamplesInRecord(PyObject *self, PyObject *args)
   long x2;
   long * x3;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -1048,13 +1190,11 @@ _cffi_f_ADI_GetNumSamplesInRecord(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1067,13 +1207,11 @@ _cffi_f_ADI_GetNumSamplesInRecord(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg3, (char **)&x3);
+      _cffi_type(4), arg3, (char **)&x3);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x3 = (long *)alloca((size_t)datasize);
-    memset((void *)x3, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x3, _cffi_type(8), arg3) < 0)
+    x3 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg3, (char **)&x3,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1084,7 +1222,9 @@ _cffi_f_ADI_GetNumSamplesInRecord(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetNumSamplesInRecord _cffi_d_ADI_GetNumSamplesInRecord
@@ -1102,7 +1242,9 @@ _cffi_f_ADI_GetNumTicksInRecord(PyObject *self, PyObject *args)
   long x1;
   long * x2;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -1111,13 +1253,11 @@ _cffi_f_ADI_GetNumTicksInRecord(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1126,13 +1266,11 @@ _cffi_f_ADI_GetNumTicksInRecord(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg2, (char **)&x2);
+      _cffi_type(4), arg2, (char **)&x2);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x2 = (long *)alloca((size_t)datasize);
-    memset((void *)x2, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x2, _cffi_type(8), arg2) < 0)
+    x2 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg2, (char **)&x2,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1143,7 +1281,9 @@ _cffi_f_ADI_GetNumTicksInRecord(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetNumTicksInRecord _cffi_d_ADI_GetNumTicksInRecord
@@ -1160,7 +1300,9 @@ _cffi_f_ADI_GetNumberOfChannels(PyObject *self, PyObject *args)
   struct ADI_FileHandle__ * x0;
   long * x1;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
 
@@ -1168,24 +1310,20 @@ _cffi_f_ADI_GetNumberOfChannels(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg1, (char **)&x1);
+      _cffi_type(4), arg1, (char **)&x1);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x1 = (long *)alloca((size_t)datasize);
-    memset((void *)x1, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x1, _cffi_type(8), arg1) < 0)
+    x1 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg1, (char **)&x1,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1196,7 +1334,9 @@ _cffi_f_ADI_GetNumberOfChannels(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetNumberOfChannels _cffi_d_ADI_GetNumberOfChannels
@@ -1213,7 +1353,9 @@ _cffi_f_ADI_GetNumberOfRecords(PyObject *self, PyObject *args)
   struct ADI_FileHandle__ * x0;
   long * x1;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
 
@@ -1221,24 +1363,20 @@ _cffi_f_ADI_GetNumberOfRecords(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg1, (char **)&x1);
+      _cffi_type(4), arg1, (char **)&x1);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x1 = (long *)alloca((size_t)datasize);
-    memset((void *)x1, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x1, _cffi_type(8), arg1) < 0)
+    x1 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg1, (char **)&x1,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1249,7 +1387,9 @@ _cffi_f_ADI_GetNumberOfRecords(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetNumberOfRecords _cffi_d_ADI_GetNumberOfRecords
@@ -1268,7 +1408,9 @@ _cffi_f_ADI_GetRecordSamplePeriod(PyObject *self, PyObject *args)
   long x2;
   double * x3;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -1278,13 +1420,11 @@ _cffi_f_ADI_GetRecordSamplePeriod(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1297,13 +1437,11 @@ _cffi_f_ADI_GetRecordSamplePeriod(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(31), arg3, (char **)&x3);
+      _cffi_type(37), arg3, (char **)&x3);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x3 = (double *)alloca((size_t)datasize);
-    memset((void *)x3, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x3, _cffi_type(31), arg3) < 0)
+    x3 = ((size_t)datasize) <= 640 ? (double *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(37), arg3, (char **)&x3,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1314,7 +1452,9 @@ _cffi_f_ADI_GetRecordSamplePeriod(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetRecordSamplePeriod _cffi_d_ADI_GetRecordSamplePeriod
@@ -1333,7 +1473,9 @@ _cffi_f_ADI_GetRecordTickPeriod(PyObject *self, PyObject *args)
   long x2;
   double * x3;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -1343,13 +1485,11 @@ _cffi_f_ADI_GetRecordTickPeriod(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1362,13 +1502,11 @@ _cffi_f_ADI_GetRecordTickPeriod(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(31), arg3, (char **)&x3);
+      _cffi_type(37), arg3, (char **)&x3);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x3 = (double *)alloca((size_t)datasize);
-    memset((void *)x3, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x3, _cffi_type(31), arg3) < 0)
+    x3 = ((size_t)datasize) <= 640 ? (double *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(37), arg3, (char **)&x3,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1379,7 +1517,9 @@ _cffi_f_ADI_GetRecordTickPeriod(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetRecordTickPeriod _cffi_d_ADI_GetRecordTickPeriod
@@ -1399,7 +1539,9 @@ _cffi_f_ADI_GetRecordTime(PyObject *self, PyObject *args)
   double * x3;
   long * x4;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -1410,13 +1552,11 @@ _cffi_f_ADI_GetRecordTime(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1425,35 +1565,29 @@ _cffi_f_ADI_GetRecordTime(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg2, (char **)&x2);
+      _cffi_type(4), arg2, (char **)&x2);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x2 = (long *)alloca((size_t)datasize);
-    memset((void *)x2, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x2, _cffi_type(8), arg2) < 0)
+    x2 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg2, (char **)&x2,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(31), arg3, (char **)&x3);
+      _cffi_type(37), arg3, (char **)&x3);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x3 = (double *)alloca((size_t)datasize);
-    memset((void *)x3, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x3, _cffi_type(31), arg3) < 0)
+    x3 = ((size_t)datasize) <= 640 ? (double *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(37), arg3, (char **)&x3,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg4, (char **)&x4);
+      _cffi_type(4), arg4, (char **)&x4);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x4 = (long *)alloca((size_t)datasize);
-    memset((void *)x4, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x4, _cffi_type(8), arg4) < 0)
+    x4 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg4, (char **)&x4,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1464,7 +1598,9 @@ _cffi_f_ADI_GetRecordTime(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetRecordTime _cffi_d_ADI_GetRecordTime
@@ -1487,7 +1623,9 @@ _cffi_f_ADI_GetSamples(PyObject *self, PyObject *args)
   float * x6;
   long * x7;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -1501,13 +1639,11 @@ _cffi_f_ADI_GetSamples(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1523,7 +1659,7 @@ _cffi_f_ADI_GetSamples(PyObject *self, PyObject *args)
   if (x3 == (long)-1 && PyErr_Occurred())
     return NULL;
 
-  if (_cffi_to_c((char *)&x4, _cffi_type(51), arg4) < 0)
+  if (_cffi_to_c((char *)&x4, _cffi_type(57), arg4) < 0)
     return NULL;
 
   x5 = _cffi_to_c_int(arg5, long);
@@ -1531,24 +1667,20 @@ _cffi_f_ADI_GetSamples(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(53), arg6, (char **)&x6);
+      _cffi_type(59), arg6, (char **)&x6);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x6 = (float *)alloca((size_t)datasize);
-    memset((void *)x6, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x6, _cffi_type(53), arg6) < 0)
+    x6 = ((size_t)datasize) <= 640 ? (float *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(59), arg6, (char **)&x6,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg7, (char **)&x7);
+      _cffi_type(4), arg7, (char **)&x7);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x7 = (long *)alloca((size_t)datasize);
-    memset((void *)x7, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x7, _cffi_type(8), arg7) < 0)
+    x7 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg7, (char **)&x7,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1559,7 +1691,9 @@ _cffi_f_ADI_GetSamples(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetSamples _cffi_d_ADI_GetSamples
@@ -1580,7 +1714,9 @@ _cffi_f_ADI_GetUnitsName(PyObject *self, PyObject *args)
   long x4;
   long * x5;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -1592,13 +1728,11 @@ _cffi_f_ADI_GetUnitsName(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(19), arg0, (char **)&x0);
+      _cffi_type(25), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_FileHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(19), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(25), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1611,13 +1745,11 @@ _cffi_f_ADI_GetUnitsName(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(11), arg3, (char **)&x3);
+      _cffi_type(2), arg3, (char **)&x3);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x3 = (wchar_t *)alloca((size_t)datasize);
-    memset((void *)x3, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x3, _cffi_type(11), arg3) < 0)
+    x3 = ((size_t)datasize) <= 640 ? (wchar_t *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(2), arg3, (char **)&x3,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1626,13 +1758,11 @@ _cffi_f_ADI_GetUnitsName(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(8), arg5, (char **)&x5);
+      _cffi_type(4), arg5, (char **)&x5);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x5 = (long *)alloca((size_t)datasize);
-    memset((void *)x5, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x5, _cffi_type(8), arg5) < 0)
+    x5 = ((size_t)datasize) <= 640 ? (long *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(4), arg5, (char **)&x5,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1643,7 +1773,9 @@ _cffi_f_ADI_GetUnitsName(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_GetUnitsName _cffi_d_ADI_GetUnitsName
@@ -1659,16 +1791,16 @@ _cffi_f_ADI_NextComment(PyObject *self, PyObject *arg0)
 {
   struct ADI_CommentsHandle__ * x0;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(4), arg0, (char **)&x0);
+      _cffi_type(10), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (struct ADI_CommentsHandle__ *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(4), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (struct ADI_CommentsHandle__ *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(10), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
@@ -1679,7 +1811,9 @@ _cffi_f_ADI_NextComment(PyObject *self, PyObject *arg0)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_NextComment _cffi_d_ADI_NextComment
@@ -1697,7 +1831,9 @@ _cffi_f_ADI_OpenFile(PyObject *self, PyObject *args)
   struct ADI_FileHandle__ * * x1;
   ADIFileOpenMode x2;
   Py_ssize_t datasize;
+  struct _cffi_freeme_s *large_args_free = NULL;
   ADIResultCode result;
+  PyObject *pyresult;
   PyObject *arg0;
   PyObject *arg1;
   PyObject *arg2;
@@ -1706,28 +1842,24 @@ _cffi_f_ADI_OpenFile(PyObject *self, PyObject *args)
     return NULL;
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(77), arg0, (char **)&x0);
+      _cffi_type(83), arg0, (char **)&x0);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x0 = (wchar_t const *)alloca((size_t)datasize);
-    memset((void *)x0, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x0, _cffi_type(77), arg0) < 0)
+    x0 = ((size_t)datasize) <= 640 ? (wchar_t const *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(83), arg0, (char **)&x0,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
   datasize = _cffi_prepare_pointer_call_argument(
-      _cffi_type(16), arg1, (char **)&x1);
+      _cffi_type(22), arg1, (char **)&x1);
   if (datasize != 0) {
-    if (datasize < 0)
-      return NULL;
-    x1 = (struct ADI_FileHandle__ * *)alloca((size_t)datasize);
-    memset((void *)x1, 0, (size_t)datasize);
-    if (_cffi_convert_array_from_object((char *)x1, _cffi_type(16), arg1) < 0)
+    x1 = ((size_t)datasize) <= 640 ? (struct ADI_FileHandle__ * *)alloca((size_t)datasize) : NULL;
+    if (_cffi_convert_array_argument(_cffi_type(22), arg1, (char **)&x1,
+            datasize, &large_args_free) < 0)
       return NULL;
   }
 
-  if (_cffi_to_c((char *)&x2, _cffi_type(79), arg2) < 0)
+  if (_cffi_to_c((char *)&x2, _cffi_type(85), arg2) < 0)
     return NULL;
 
   Py_BEGIN_ALLOW_THREADS
@@ -1737,7 +1869,9 @@ _cffi_f_ADI_OpenFile(PyObject *self, PyObject *args)
   Py_END_ALLOW_THREADS
 
   (void)self; /* unused */
-  return _cffi_from_c_deref((char *)&result, _cffi_type(81));
+  pyresult = _cffi_from_c_deref((char *)&result, _cffi_type(1));
+  if (large_args_free != NULL) _cffi_free_array_arguments(large_args_free);
+  return pyresult;
 }
 #else
 #  define _cffi_f_ADI_OpenFile _cffi_d_ADI_OpenFile
@@ -1762,22 +1896,23 @@ static void _cffi_checkfld_struct_ADI_FileHandle__(struct ADI_FileHandle__ *p)
 struct _cffi_align_struct_ADI_FileHandle__ { char x; struct ADI_FileHandle__ y; };
 
 static const struct _cffi_global_s _cffi_globals[] = {
-  { "ADI_CloseCommentsAccessor", (void *)_cffi_f_ADI_CloseCommentsAccessor, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_O, 0), (void *)_cffi_d_ADI_CloseCommentsAccessor },
-  { "ADI_CloseFile", (void *)_cffi_f_ADI_CloseFile, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_O, 15), (void *)_cffi_d_ADI_CloseFile },
-  { "ADI_CreateCommentsAccessor", (void *)_cffi_f_ADI_CreateCommentsAccessor, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 64), (void *)_cffi_d_ADI_CreateCommentsAccessor },
-  { "ADI_GetChannelName", (void *)_cffi_f_ADI_GetChannelName, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 69), (void *)_cffi_d_ADI_GetChannelName },
-  { "ADI_GetCommentInfo", (void *)_cffi_f_ADI_GetCommentInfo, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 6), (void *)_cffi_d_ADI_GetCommentInfo },
-  { "ADI_GetNumSamplesInRecord", (void *)_cffi_f_ADI_GetNumSamplesInRecord, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 40), (void *)_cffi_d_ADI_GetNumSamplesInRecord },
-  { "ADI_GetNumTicksInRecord", (void *)_cffi_f_ADI_GetNumTicksInRecord, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 22), (void *)_cffi_d_ADI_GetNumTicksInRecord },
-  { "ADI_GetNumberOfChannels", (void *)_cffi_f_ADI_GetNumberOfChannels, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 18), (void *)_cffi_d_ADI_GetNumberOfChannels },
-  { "ADI_GetNumberOfRecords", (void *)_cffi_f_ADI_GetNumberOfRecords, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 18), (void *)_cffi_d_ADI_GetNumberOfRecords },
-  { "ADI_GetRecordSamplePeriod", (void *)_cffi_f_ADI_GetRecordSamplePeriod, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 34), (void *)_cffi_d_ADI_GetRecordSamplePeriod },
-  { "ADI_GetRecordTickPeriod", (void *)_cffi_f_ADI_GetRecordTickPeriod, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 34), (void *)_cffi_d_ADI_GetRecordTickPeriod },
-  { "ADI_GetRecordTime", (void *)_cffi_f_ADI_GetRecordTime, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 27), (void *)_cffi_d_ADI_GetRecordTime },
-  { "ADI_GetSamples", (void *)_cffi_f_ADI_GetSamples, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 46), (void *)_cffi_d_ADI_GetSamples },
-  { "ADI_GetUnitsName", (void *)_cffi_f_ADI_GetUnitsName, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 56), (void *)_cffi_d_ADI_GetUnitsName },
-  { "ADI_NextComment", (void *)_cffi_f_ADI_NextComment, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_O, 3), (void *)_cffi_d_ADI_NextComment },
-  { "ADI_OpenFile", (void *)_cffi_f_ADI_OpenFile, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 76), (void *)_cffi_d_ADI_OpenFile },
+  { "ADI_CloseCommentsAccessor", (void *)_cffi_f_ADI_CloseCommentsAccessor, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_O, 6), (void *)_cffi_d_ADI_CloseCommentsAccessor },
+  { "ADI_CloseFile", (void *)_cffi_f_ADI_CloseFile, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_O, 21), (void *)_cffi_d_ADI_CloseFile },
+  { "ADI_CreateCommentsAccessor", (void *)_cffi_f_ADI_CreateCommentsAccessor, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 70), (void *)_cffi_d_ADI_CreateCommentsAccessor },
+  { "ADI_GetChannelName", (void *)_cffi_f_ADI_GetChannelName, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 75), (void *)_cffi_d_ADI_GetChannelName },
+  { "ADI_GetCommentInfo", (void *)_cffi_f_ADI_GetCommentInfo, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 12), (void *)_cffi_d_ADI_GetCommentInfo },
+  { "ADI_GetErrorMessage", (void *)_cffi_f_ADI_GetErrorMessage, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 0), (void *)_cffi_d_ADI_GetErrorMessage },
+  { "ADI_GetNumSamplesInRecord", (void *)_cffi_f_ADI_GetNumSamplesInRecord, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 46), (void *)_cffi_d_ADI_GetNumSamplesInRecord },
+  { "ADI_GetNumTicksInRecord", (void *)_cffi_f_ADI_GetNumTicksInRecord, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 28), (void *)_cffi_d_ADI_GetNumTicksInRecord },
+  { "ADI_GetNumberOfChannels", (void *)_cffi_f_ADI_GetNumberOfChannels, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 24), (void *)_cffi_d_ADI_GetNumberOfChannels },
+  { "ADI_GetNumberOfRecords", (void *)_cffi_f_ADI_GetNumberOfRecords, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 24), (void *)_cffi_d_ADI_GetNumberOfRecords },
+  { "ADI_GetRecordSamplePeriod", (void *)_cffi_f_ADI_GetRecordSamplePeriod, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 40), (void *)_cffi_d_ADI_GetRecordSamplePeriod },
+  { "ADI_GetRecordTickPeriod", (void *)_cffi_f_ADI_GetRecordTickPeriod, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 40), (void *)_cffi_d_ADI_GetRecordTickPeriod },
+  { "ADI_GetRecordTime", (void *)_cffi_f_ADI_GetRecordTime, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 33), (void *)_cffi_d_ADI_GetRecordTime },
+  { "ADI_GetSamples", (void *)_cffi_f_ADI_GetSamples, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 52), (void *)_cffi_d_ADI_GetSamples },
+  { "ADI_GetUnitsName", (void *)_cffi_f_ADI_GetUnitsName, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 62), (void *)_cffi_d_ADI_GetUnitsName },
+  { "ADI_NextComment", (void *)_cffi_f_ADI_NextComment, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_O, 9), (void *)_cffi_d_ADI_NextComment },
+  { "ADI_OpenFile", (void *)_cffi_f_ADI_OpenFile, _CFFI_OP(_CFFI_OP_CPYTHON_BLTN_V, 82), (void *)_cffi_d_ADI_OpenFile },
   { "kADICDataAtSampleRate", (void *)_cffi_const_kADICDataAtSampleRate, _CFFI_OP(_CFFI_OP_ENUM, -1), (void *)0 },
   { "kADICDataAtTickRate", (void *)_cffi_const_kADICDataAtTickRate, _CFFI_OP(_CFFI_OP_ENUM, -1), (void *)0 },
   { "kOpenFileForReadAndWrite", (void *)_cffi_const_kOpenFileForReadAndWrite, _CFFI_OP(_CFFI_OP_ENUM, -1), (void *)0 },
@@ -1800,35 +1935,35 @@ static const struct _cffi_global_s _cffi_globals[] = {
 static const struct _cffi_field_s _cffi_fields[] = {
   { "unused", offsetof(struct ADI_CommentsHandle__, unused),
               sizeof(((struct ADI_CommentsHandle__ *)0)->unused),
-              _CFFI_OP(_CFFI_OP_NOOP, 84) },
+              _CFFI_OP(_CFFI_OP_NOOP, 89) },
   { "unused", offsetof(struct ADI_FileHandle__, unused),
               sizeof(((struct ADI_FileHandle__ *)0)->unused),
-              _CFFI_OP(_CFFI_OP_NOOP, 84) },
+              _CFFI_OP(_CFFI_OP_NOOP, 89) },
 };
 
 static const struct _cffi_struct_union_s _cffi_struct_unions[] = {
-  { "ADI_CommentsHandle__", 85, _CFFI_F_CHECK_FIELDS,
+  { "ADI_CommentsHandle__", 90, _CFFI_F_CHECK_FIELDS,
     sizeof(struct ADI_CommentsHandle__), offsetof(struct _cffi_align_struct_ADI_CommentsHandle__, y), 0, 1 },
-  { "ADI_FileHandle__", 86, _CFFI_F_CHECK_FIELDS,
+  { "ADI_FileHandle__", 91, _CFFI_F_CHECK_FIELDS,
     sizeof(struct ADI_FileHandle__), offsetof(struct _cffi_align_struct_ADI_FileHandle__, y), 1, 1 },
 };
 
 static const struct _cffi_enum_s _cffi_enums[] = {
-  { "ADICDataFlags", 51, _cffi_prim_int(sizeof(ADICDataFlags), ((ADICDataFlags)-1) <= 0),
+  { "ADICDataFlags", 57, _cffi_prim_int(sizeof(ADICDataFlags), ((ADICDataFlags)-1) <= 0),
     "kADICDataAtSampleRate,kADICDataAtTickRate" },
-  { "ADIFileOpenMode", 79, _cffi_prim_int(sizeof(ADIFileOpenMode), ((ADIFileOpenMode)-1) <= 0),
+  { "ADIFileOpenMode", 85, _cffi_prim_int(sizeof(ADIFileOpenMode), ((ADIFileOpenMode)-1) <= 0),
     "kOpenFileForReadOnly,kOpenFileForReadAndWrite" },
-  { "ADIResultCode", 81, _cffi_prim_int(sizeof(ADIResultCode), ((ADIResultCode)-1) <= 0),
+  { "ADIResultCode", 1, _cffi_prim_int(sizeof(ADIResultCode), ((ADIResultCode)-1) <= 0),
     "kResultSuccess,kResultErrorFlagBit,kResultInvalidArg,kResultFail,kResultFileNotFound,kResultADICAPIMsgBase,kResultFileIOError,kResultFileOpenFail,kResultInvalidFileHandle,kResultInvalidPosition,kResultInvalidCommentNum,kResultNoData,kResultBufferTooSmall" },
 };
 
 static const struct _cffi_typename_s _cffi_typenames[] = {
-  { "ADICDataFlags", 51 },
-  { "ADIFileOpenMode", 79 },
-  { "ADIResultCode", 81 },
-  { "ADI_CommentsHandle", 4 },
-  { "ADI_FileHandle", 19 },
-  { "time_t", 12 },
+  { "ADICDataFlags", 57 },
+  { "ADIFileOpenMode", 85 },
+  { "ADIResultCode", 1 },
+  { "ADI_CommentsHandle", 10 },
+  { "ADI_FileHandle", 25 },
+  { "time_t", 3 },
 };
 
 static const struct _cffi_type_context_s _cffi_type_context = {
@@ -1838,12 +1973,12 @@ static const struct _cffi_type_context_s _cffi_type_context = {
   _cffi_struct_unions,
   _cffi_enums,
   _cffi_typenames,
-  33,  /* num_globals */
+  34,  /* num_globals */
   2,  /* num_struct_unions */
   3,  /* num_enums */
   6,  /* num_typenames */
   NULL,  /* no includes */
-  88,  /* num_types */
+  93,  /* num_types */
   0,  /* flags */
 };
 
