@@ -4,9 +4,13 @@ Use this code to read .adicht (Labchart) files into Python. Interfacing with the
 
 - The code utilizes the SDK from ADIstruments to read files in Python as NumPy arrays.
 - Currently only works for Windows.
-- A slightly more flushed out Matlab version can be found here
-https://github.com/JimHokanson/adinstruments_sdk_matlab
+- A slightly more flushed out Matlab version can be found [here](https://github.com/JimHokanson/adinstruments_sdk_matlab).
 
+---
+
+## Installation ##
+
+	pip install adi-reader
 
 ----
 
