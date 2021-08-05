@@ -7,7 +7,13 @@ import numpy as np
 
 #Note apparently pylint doesn't like this because it is from a dll (.pyd file)
 #https://stackoverflow.com/questions/28437071/pylint-1-4-reports-e1101no-member-on-all-c-extensions
-from adi._adi_cffi import ffi, lib
+import struct
+
+p_size = struct.calcsize("P")
+if p_size == 4:
+    from adi._adi_cffi2 import ffi, lib
+else:
+    from adi._adi_cffi import ffi, lib
 
 r"""
     #Test Code:
