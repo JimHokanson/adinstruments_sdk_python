@@ -44,9 +44,14 @@ Use this code to read .adicht (Labchart) files into Python. Interfacing with the
 - Running the code might require compiling the cffi code depending on your Python version. 
 - This requires running cffi_build.py in the adi package. 
 - This might require installing cffi as well as some version of Visual Studio. 
-- The currently released code was compiled for Python 3.6-3.8 on Visual Studio 14.0 or greater was required.
+- The currently released code was compiled for Python 3.6-3.9 on Visual Studio 14.0 or greater was required.
 
 For upgrading to 3.8, I installed Python 3.8. Within the interpreter I ran the following:
+
+- Jim note to self, rather than installing Anaconda I simply:
+  - download Python from https://www.python.org/downloads/windows/
+  - cd to Python directory or run directly, these go to something like: `C:\Users\RNEL\AppData\Local\Programs\Python\Python39-32\python` 
+  - Note the above path is specific to my computer, might need to change user name
 
 ```python
 import subprocess
@@ -62,7 +67,11 @@ import os
 #This would need to be changed based on where you keep the code
 os.chdir('G:/repos/python/adinstruments_sdk_python/adi')
 
+# For 64 bit windows
 exec(open("cffi_build.py").read())
+
+# For 32 bit windows
+exec(open("cffi_build_win32.py").read())
 ```
 ----
 
