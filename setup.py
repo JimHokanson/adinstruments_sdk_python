@@ -7,7 +7,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="adi-reader",
-    version="0.0.6",
+    version="0.0.8",
     author="Jim Hokanson",
     author_email="jim.hokanson@gmail.com",
     description="Reading LabChart recorded data",
