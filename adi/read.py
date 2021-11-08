@@ -192,6 +192,8 @@ class Channel():
         
         if start_sample is None:
             start_sample = 1
+        elif start_sample < 1:
+            raise Exception('The value of start_sample has to be greater than 0')
             
         if stop_sample is None:
             stop_sample = self.n_samples[record_id-1]
