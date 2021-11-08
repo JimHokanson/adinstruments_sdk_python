@@ -34,9 +34,9 @@ Use this code to read .adicht (Labchart) files into Python. Interfacing with the
 ----
 
 ## Dependencies ##
-
+- [cffi](https://cffi.readthedocs.io/en/latest/)
 - [NumPy](https://numpy.org/)
-- Python 3.6-3.8
+- Python 3.6-3.9
 ----
 
 ## Setup for other Python versions ##
