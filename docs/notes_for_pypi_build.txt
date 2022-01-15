@@ -1,0 +1,14 @@
+#Notes for sending to pypi
+
+G:
+cd G:\repos\python\adinstruments_sdk_python
+#These are temporary path modification commands
+set PATH=%PATH%;C:\Users\RNEL\AppData\Local\Programs\Python\Python39\Scripts
+set PATH=%PATH%;C:\Users\RNEL\AppData\Local\Programs\Python\Python39
+pip install wheel
+python setup.py sdist bdist_wheel
+
+twine upload dist/*
+will be prompted for user/pass
+
+remove all build files
