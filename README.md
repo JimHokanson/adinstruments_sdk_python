@@ -3,7 +3,7 @@
 Use this code to read .adicht (Labchart) files into Python. Interfacing with the ADIstruments DLL is done via [cffi](https://cffi.readthedocs.io/en/latest/).
 
 - The code utilizes the SDK from ADIstruments to read files in Python as NumPy arrays.
-- Currently only works for Windows.
+- **Currently only works for Windows. Not fixable by me, requires changes by ADInstruments**
 - A slightly more flushed out Matlab version can be found [here](https://github.com/JimHokanson/adinstruments_sdk_matlab).
 
 ---
@@ -52,6 +52,10 @@ For upgrading to 3.8, I installed Python 3.8. Within the interpreter I ran the f
   - download Python from https://www.python.org/downloads/windows/
   - cd to Python directory or run directly, these go to something like: `C:\Users\RNEL\AppData\Local\Programs\Python\Python39-32\python` 
   - Note the above path is specific to my computer, might need to change user name
+  - This has result in an error that I need MS C++ Build tools : "Microsoft Visual C++ 14.0 or greater is required. Get it with "Microsoft C++ Build Tools": https://visualstudio.microsoft.com/visual-cpp-build-tools/" Ultimately I had to install the package along with the correct OS SDK (Windows 10 SDK for me).
+  
+  ![image](https://github.com/JimHokanson/adinstruments_sdk_python/assets/1593287/c94114a7-4cc1-4c59-a25a-f319d02402d9)
+
 
 ```python
 import subprocess
@@ -65,15 +69,27 @@ install("cffi")
 
 import os
 #This would need to be changed based on where you keep the code
-os.chdir('G:/repos/python/adinstruments_sdk_python/adi')
+os.chdir('E:/repos/python/adinstruments_sdk_python/adi')
 
 # For 64 bit windows
 exec(open("cffi_build.py").read())
 
+
+
+#------------------------- ONLY IF 32 BIT WINDOWS -------------------
 # For 32 bit windows
 exec(open("cffi_build_win32.py").read())
 ```
 ----
+
+## PyPi Notes ##
+
+- update version in setup.py
+- update Python version in setup.py
+- from Anaconda I ran the command line in my enviroment and made sure twine was installed `pip install twine`. Then I changed my drive `e:` changes to the E drive and then cd'd to the directory to run:
+  - `python setup.py sdist bdist_wheel`
+  - `twine upload dist/*`
+
 
 ## Improvements ##
 
