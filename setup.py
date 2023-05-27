@@ -7,7 +7,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="adi-reader",
-    version="0.0.8",
+    version="0.0.9",
     author="Jim Hokanson",
     author_email="jim.hokanson@gmail.com",
     description="Reading LabChart recorded data",
@@ -21,6 +21,6 @@ setuptools.setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: Microsoft :: Windows",
     ],
-    python_requires='>= 3.6, < 3.10',
+    python_requires='>= 3.6, < 3.12',
     include_package_data=True,
 )
