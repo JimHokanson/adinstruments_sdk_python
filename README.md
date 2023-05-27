@@ -82,6 +82,15 @@ exec(open("cffi_build_win32.py").read())
 ```
 ----
 
+## PyPi Notes ##
+
+- update version in setup.py
+- update Python version in setup.py
+- from Anaconda I ran the command line in my enviroment and made sure twine was installed `pip install twine`. Then I changed my drive `e:` changes to the E drive and then cd'd to the directory to run:
+  - `python setup.py sdist bdist_wheel`
+  - `twine upload dist/*`
+
+
 ## Improvements ##
 
 This was written extremely quickly and is missing some features. Feel free to open pull requests or to open issues.
