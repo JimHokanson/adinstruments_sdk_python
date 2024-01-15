@@ -429,11 +429,13 @@ class SDK():
     
     @staticmethod       
     def get_channel_data(h,record_id,channel_id,start_sample,stop_sample):
-        
-        
+
         n_elements = stop_sample-start_sample+1
-        np_arr = np.empty(n_elements, dtype=np.float32)
         
+        if n_elements <= 0:
+            raise ValueError("# of samples requested is less than 1")
+        
+        np_arr = np.zeros(n_elements, dtype=np.float32)
         
         #Note, we might just be able to case to numpy after running
         #=> numpy.frombuffer => 0 copy?
