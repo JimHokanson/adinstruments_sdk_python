@@ -65,7 +65,8 @@ import sys
 #https://stackoverflow.com/questions/12332975/installing-python-module-within-code
 def install(package):
     subprocess.call([sys.executable, "-m", "pip", "install", package])
-	
+
+install("setuptools")
 install("cffi")
 
 import os
