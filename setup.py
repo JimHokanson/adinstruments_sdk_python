@@ -21,6 +21,6 @@ setuptools.setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: Microsoft :: Windows",
     ],
-    python_requires='>= 3.6, <= 3.13',
+    python_requires='>= 3.6, < 3.14',
     include_package_data=True,
 )
