@@ -139,9 +139,23 @@ def print_object(obj):
 class Comment():
     
     """
-    Currently created in get_all_comments
+    This is currently created in the Record constructor.
     
-    TODO: In record add dt info so that time is valid as well (needs dt)
+    A comment consists primarily of a string and the time that it applies to.
+    
+    Attributes
+    ----------
+    text : string
+        The comment string
+    tick_position :
+    channel : numeric
+        - a value of -1 indicates all channels
+    id : 
+        This starts at 1 and increments but may have gaps if comments are deleted.
+        Also, I don't think these are returned in order (time order instead of id order?)
+    tick_dt :
+    time : 
+        Seconds since start of recording (based on tick position)
     
     """
     def __init__(self,text,tick_pos,channel_id,comment_id):
@@ -162,6 +176,40 @@ class Comment():
 
 class Channel():
     
+    """
+    Attributes
+    ----------
+    h : 
+        Handle to the SDK for making calls.
+    id : numeric
+        Channel ID, starts at 1
+    n_records : numeric
+    tick_dt : list, length: n_records
+        Highest sampling rate of any channel for that record. Not really
+        critical for this object (use dt/fs instead)
+    records : [Record]
+        Provides acccess to the relevant record
+    name :
+        This is fixed across all records
+    units : list, length: n_records
+    n_samples : list, length: n_records
+    dt : list, length: n_records
+        Time between samples
+    fs : list, length: n_records
+        Sampling rate
+    max_time : 
+        Last time point where data was collected.
+        
+    Notes
+    ------
+    1. Data for a channel may not exist for a given record.    
+        
+    Methods
+    -------
+    get_data : retrieves data
+    
+    """
+    
     def __init__(self,h,channel_id,records):
         self.h = h
         self.id = channel_id #1 based
@@ -175,32 +223,78 @@ class Channel():
         self.n_samples = [SDK.get_n_samples_in_record(self.h,x+1,self.id) for x in range(self.n_records)]
         self.dt = [SDK.get_sample_period(self.h,x+1,self.id) for x in range(self.n_records)]
         self.fs = [1/x for x in self.dt]
+        self.max_time = [(self.n_samples[x]-1)*self.dt[x] if self.n_samples[x] > 0 else None for x in range(self.n_records)]
         
+    def get_data(self, record_id, start_sample=None, stop_sample=None,
+                 start_time=None, stop_time=None, return_time=False):
         """
- https://github.com/JimHokanson/adinstruments_sdk_matlab/blob/master/%2Badi/%40channel/channel.m       
-        obj.tick_dt        = [record_handles.tick_dt];
-            obj.data_starts    = [record_handles.data_start];
-            obj.record_starts  = [record_handles.record_start];
-            obj.record_handles = record_handles;
-        """
-        #self.tick_dt = [x.tick_dt for x in records]
-        #self.tick_dt = [x.tick_dt for x in records]
-        #self.tick_dt = [x.tick_dt for x in records]
-
-
-    def get_data(self,record_id,start_sample=None,stop_sample=None):
+        Calling Forms
+        -------------
+        data = chan.get_data(record_id,**options)
         
-        if start_sample is None:
-            start_sample = 1
-        elif start_sample < 1:
-            raise Exception('The value of start_sample has to be greater than 0')
+        time,data = chan.get_data(record_id,return_time=True,**options)
+        
+        
+        Parameters
+        ----------
+        record_id : numeric
+            Which record to retrieve data from.
+        start_sample : numeric, optional
+            Default 1. Ignored if start_time is provided.
+        stop_sample : numeric, optional
+            Default last sample. Ignored if stop_time is provided.
+        start_time : numeric, optional
+            Start time in seconds. Overrides start_sample if provided.
+        stop_time : numeric, optional
+            Stop time in seconds. Overrides stop_sample if provided.
+        return_time : boolean, optional
+            If True, returns a tuple of (time_array, data_array).
+            The default is False.
             
-        if stop_sample is None:
-            stop_sample = self.n_samples[record_id-1]
-        elif stop_sample > self.n_samples[record_id-1]:   
-            raise Exception('Out of range data requested')
+            
+        Returns
+        -------
+        numpy array, or tuple of (numpy array, numpy array) if return_time=True   
         
-        return SDK.get_channel_data(self.h,record_id,self.id,start_sample,stop_sample)
+        Improvements
+        ------------
+        1. Consider adding sample_range = [start,stop] and time_range = [start,stop]
+        
+        """
+        
+        dt = self.dt[record_id - 1]
+    
+        #Start sample determination
+        #------------------------------------------
+        if start_time is not None:
+            # Convert to 1-based sample index
+            start_sample = int(start_time / dt) + 1  
+        elif start_sample is None:
+            start_sample = 1
+        
+        #Stop sample determination
+        #------------------------------------------
+        if stop_time is not None:
+            stop_sample = int(stop_time / dt) + 1
+        elif stop_sample is None:
+            stop_sample = self.n_samples[record_id - 1]
+        
+        
+        # Validate computed sample bounds
+        #------------------------------------------
+        if start_sample < 1:
+            raise Exception('Computed start_sample from start_time is out of range')
+        if stop_sample > self.n_samples[record_id - 1]:
+            raise Exception('Computed stop_sample from stop_time is out of range')
+    
+        data = SDK.get_channel_data(self.h, record_id, self.id, start_sample, stop_sample)
+    
+        if return_time:
+            time = np.arange(start_sample - 1, stop_sample) * dt  # 0-based time in seconds
+            return time, data
+        else:    
+            return data
+        
 
     def __repr__(self):
         return print_object(self)         
@@ -209,9 +303,26 @@ class Channel():
 class RecordTime():
     
     """
-    Apparently it is possible to trigger data collection before or after a trigger signal.
+    Describes when a record started (in real/wall time). There is also some
+    triggering information which I don't completely understand ...
     
-    Datetimes for both the trigger and data start are properties of this class.
+    Attributes
+    ----------
+    trig_datetime : datetime
+    trig_start_delta : numeric
+        Difference between trigger and data collection start, in ticks. If 
+        positive then data started later. If negative, data collection starts
+        before the trigger (presumably using a buffer approach to allow going
+        back in time to get data before the trigger occurs)
+    trig_datestr : string
+    rec_datetime : datetime
+        I believe this is the actual time when the first sample was collected
+    rec_datestr : string
+        
+    
+    It is possible to trigger data collection before or after the trigger signal.
+    
+    
     """
     def __init__(self,tick_dt,trig_time,frac_secs,trig_minus_start_ticks):
         
@@ -227,7 +338,7 @@ class RecordTime():
             self.rec_datetime = self.trig_datetime - delta;
         
         self.rec_datestr = self.rec_datetime.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip('0')
-        
+                
         #+ve - trigger before block
         #-ve - trigger after block
     
@@ -237,22 +348,32 @@ class RecordTime():
 class Record():
     
     """
+    Holder of comments and record timing information.
+    
     Attributes
     ----------
-    n_ticks :
+    h : handle to the SDK
+    id : numeric
+        Record indicator, starts at 1
+    n_ticks : numeric
         # of samples in the record for the channel sampled at the highest rate
-    tick_dt :
+    tick_dt : numeric
         Time between "ticks"
-    comments : Comment
+    tick_fs : numeric
+        Sampling rate of ticks
+    comments : [Comment]
+    record_time : RecordTime
+        
     
     """
     def __init__(self,h,record_id):
         
         """
+        Parameters
+        ----------
         h : 
             Handle to the underlying file pointer
-        sdk : SDK
-        record_id : int?
+        record_id : numeric
             1 based record
         """
         self.h = h
@@ -264,9 +385,11 @@ class Record():
         #Not actually channel specific, channel is ignored (according to ADI)
         #Hard coded in "first channel" => 1
         self.tick_dt = SDK.get_tick_period(self.h,record_id,1)
+        self.tick_fs = 1.0/self.tick_dt
         
         self.comments = SDK.get_all_comments(self.h,record_id)
         
+        #JAH: Why did I do this as a later step?
         for c in self.comments:
             c._add_info(self.tick_dt)
             
@@ -285,6 +408,22 @@ class File():
     ----------
     file_loaded
     h
+    n_records
+    n_channels
+    records
+    channels
+    channel_names
+    
+    Methods
+    -------
+    get_channel_by_name - returns a specific channel
+    
+    
+    Missing methods from MATLAB version (i.e., potential improvements)
+    ------------------------------------------------------------------
+    - isChannelInRecord - flag on whether channel is in specified record
+    - channelsInRecord - list of channels in record
+    - getAllComments - return all comments
     
     
     """
@@ -300,7 +439,56 @@ class File():
         self.records = [Record(self.h,x+1) for x in range(self.n_records)]
         
         self.channels = [Channel(self.h,x+1,self.records) for x in range(self.n_channels)]
+        self.channel_names = [x.name for x in self.channels]
         
+    def get_channel_by_name(self,chan_name,case_sensitive=False,partial_match=True):
+        """
+
+        Parameters
+        ----------
+        chan_name : string
+            Name of the channel to match
+        case_sensitive : boolean, optional
+            Whether to require case matching. The default is False.
+        partial_match : boolean, optional
+            Whether to allow partial matching. For example 'pres' could
+            be used to match 'Bladder Pressure'. The default is True.
+
+        Returns
+        -------
+        channel object
+
+        """
+        # Normalize the search term if case-insensitive
+        search_name = chan_name if case_sensitive else chan_name.lower()
+    
+        matched_names = []
+        matched_channels = []
+    
+        for name, channel in zip(self.channel_names, self.channels):
+            candidate = name if case_sensitive else name.lower()
+    
+            if partial_match:
+                is_match = search_name in candidate
+            else:
+                is_match = search_name == candidate
+    
+            if is_match:
+                matched_names.append(name)
+                matched_channels.append(channel)
+    
+        if len(matched_channels) == 0:
+            raise ValueError(
+                f"No channel found matching '{chan_name}'. "
+                f"Available channels: {self.channel_names}"
+            )
+        elif len(matched_channels) > 1:
+            raise ValueError(
+                f"Multiple channels found matching '{chan_name}': {matched_names}. "
+                f"Please provide a more specific name."
+            )
+
+        return matched_channels[0]
     
     def __del__(self):
         #print("object deleted")

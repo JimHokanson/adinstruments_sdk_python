@@ -4,95 +4,99 @@ Use this code to read .adicht (Labchart) files into Python. Interfacing with the
 
 - The code utilizes the SDK from ADIstruments to read files in Python as NumPy arrays.
 - **Currently only works for Windows. Not fixable by me, requires changes by ADInstruments**
-- A slightly more fleshed out Matlab version can be found [here](https://github.com/JimHokanson/adinstruments_sdk_matlab).
-- Currently requires Python 3.6-3.11 with some of the newer versions requiring 64 bit Python (this can change but requires some work on my end)
-
----
+- A slightly more fleshed out MATLAB version can be found [here](https://github.com/JimHokanson/adinstruments_sdk_matlab).
+- Currently requires Python 3.6-3.14 with some of the newer versions requiring 64 bit Python (this can change but requires some work on my end)
 
 ## Installation ##
 
 	pip install adi-reader
 
-----
 
-## Test code ##
+## Demo code ##
 
 ```python
-    import adi
-    f = adi.read_file(r'C:\Users\RNEL\Desktop\test\test_file.adicht')
-    # All id numbering is 1 based, first channel, first block
-    # When indexing in Python we need to shift by 1 for 0 based indexing
-    # Functions however respect the 1 based notation ...
-    
-    # These may vary for your file ...
-    channel_id = 2
-    record_id = 1
-    data = f.channels[channel_id-1].get_data(record_id)
-    import matplotlib.pyplot as plt
-    plt.plot(data)
-    plt.show()
+import adi
+f = adi.read_file(r'C:\Users\RNEL\Desktop\test\test_file.adicht')
+# All id numbering is 1 based, first channel, first block
+# When indexing in Python we need to shift by 1 for 0 based indexing
+# Functions however respect the 1 based notation ...
+
+# These may vary for your file ...
+channel_id = 2
+record_id = 1
+data = f.channels[channel_id-1].get_data(record_id)
+
+import matplotlib.pyplot as plt
+plt.plot(data)
+plt.show()
+	
 ```
-----
+
+Grabbing data from a specific channel. Some advanced data retrieval functionality is also shown.
+```python
+import adi
+f = adi.read_file(r'C:\Users\RNEL\Desktop\test\test_file.adicht')
+#Note, this defaults to a partial, case insensitive match
+p = f.get_channel_by_name('pres')
+
+record_id = 1
+#time units are in seconds
+time,data = p.get_data(record_id,start_time=10,return_time=True)
+
+
+plt.plot(time,data)
+plt.xlabel('time (s)')
+plt.ylabel(f'{p.name} ({p.units[record_id]})')
+plt.show()
+
+```
+
+
+
 
 ## Dependencies ##
+
 - [cffi](https://cffi.readthedocs.io/en/latest/)
 - [NumPy](https://numpy.org/)
-- Python 3.6-3.11
-----
-
-## Setup for other Python versions ##
-
-- Running the code might require compiling the cffi code depending on your Python version. 
-- This requires running cffi_build.py in the adi package. 
-- This might require installing cffi as well as some version of Visual Studio. 
-- The currently released code was compiled for Python 3.6-3.9 on Visual Studio 14.0 or greater was required.
-
-For upgrading to 3.8, I installed Python 3.8. Within the interpreter I ran the following:
-
-- Jim note to self, rather than installing Anaconda I simply:
-  - download Python from https://www.python.org/downloads/windows/
-  - cd to Python directory or run directly, these go to something like: `C:\Users\RNEL\AppData\Local\Programs\Python\Python39-32\python` 
-  - Note the above path is specific to my computer, might need to change user name
-  - This has result in an error that I need MS C++ Build tools : "Microsoft Visual C++ 14.0 or greater is required. Get it with "Microsoft C++ Build Tools": https://visualstudio.microsoft.com/visual-cpp-build-tools/" Ultimately I had to install the package along with the correct OS SDK (Windows 10 SDK for me).
-  
-  ![image](https://github.com/JimHokanson/adinstruments_sdk_python/assets/1593287/c94114a7-4cc1-4c59-a25a-f319d02402d9)
+- Python 3.6-3.14
 
 
-```python
-import subprocess
-import sys
+## Data Model ##
 
-#https://stackoverflow.com/questions/12332975/installing-python-module-within-code
-def install(package):
-    subprocess.call([sys.executable, "-m", "pip", "install", package])
+Data are collected in blocks or records, starting at record 1. For each record the channel properties can change (units, sampling rate). Every time settings are changed or recording stops, a new block is created (once recording starts again).
 
-install("setuptools")
-install("cffi")
+The two primary data types that are exposed through the SDK are:
+- channel data
+- comments - time of comment and text information (along with an id and info on which channel the comment applies to)
 
-import os
-#This would need to be changed based on where you keep the code
-os.chdir('E:/repos/python/adinstruments_sdk_python/adi')
+There are other things that are collected in LabChart files, but these are not exposed via the SDK.
 
-# For 64 bit windows
-exec(open("cffi_build.py").read())
-
-
-
-#------------------------- ONLY IF 32 BIT WINDOWS -------------------
-# For 32 bit windows
-exec(open("cffi_build_win32.py").read())
-```
-----
-
-## PyPi Notes ##
-
-- update version in setup.py
-- update Python version in setup.py
-- from Anaconda I ran the command line in my enviroment and made sure twine was installed `pip install twine`. Then I changed my drive `e:` changes to the E drive and then cd'd to the directory to run:
-  - `python setup.py sdist bdist_wheel`
-  - `twine upload dist/*`
+- file
+  - records
+     - timing info
+	 - comments
+  - channels
+     - data
 
 
 ## Improvements ##
 
-This was written extremely quickly and is missing some features. Feel free to open pull requests or to open issues.
+Feel free to open pull requests or to open issues.
+
+Things I would like to add at some point:
+- a general review tool that plots a file
+- even simpler, plotting a channel with comments
+- better method support for getting specific info
+- better functionality of data retrieval
+
+
+## Change Notes ##
+
+- 2026-04-12 :
+  - Added 3.14 support
+  - Improved documentation
+
+
+## Support Notes ##
+
+My ability to work on this code was supported, in part, by a grant from the NIH NIDDK ([grant: R21DK140694](https://reporter.nih.gov/project-details/11232104))
