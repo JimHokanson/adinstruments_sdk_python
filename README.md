@@ -11,6 +11,17 @@ Use this code to read .adicht (Labchart) files into Python. Interfacing with the
 
 	pip install adi-reader
 
+## Support Notes ##
+
+My ability to work on this code was supported, in part, by a grant from the NIH NIDDK ([grant: R21DK140694](https://reporter.nih.gov/project-details/11232104))
+
+
+## Dependencies ##
+
+- [cffi](https://cffi.readthedocs.io/en/latest/)
+- [NumPy](https://numpy.org/)
+- Python 3.6-3.14
+
 
 ## Demo code ##
 
@@ -53,14 +64,6 @@ plt.show()
 
 
 
-
-## Dependencies ##
-
-- [cffi](https://cffi.readthedocs.io/en/latest/)
-- [NumPy](https://numpy.org/)
-- Python 3.6-3.14
-
-
 ## Data Model ##
 
 Data are collected in blocks or records, starting at record 1. For each record the channel properties can change (units, sampling rate). Every time settings are changed or recording stops, a new block is created (once recording starts again).
@@ -95,8 +98,3 @@ Things I would like to add at some point:
 - 2026-04-12 :
   - Added 3.14 support
   - Improved documentation
-
-
-## Support Notes ##
-
-My ability to work on this code was supported, in part, by a grant from the NIH NIDDK ([grant: R21DK140694](https://reporter.nih.gov/project-details/11232104))
