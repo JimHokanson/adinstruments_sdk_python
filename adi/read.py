@@ -1,14 +1,32 @@
+from __future__ import annotations
 
+#Standard
+#------------------------
+from dataclasses import dataclass
+from typing import overload, Literal, Sequence, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
+    
 import inspect
 from datetime import datetime, timedelta
 
+
+
+#Third Party
+#------------------------
 #This is used only for returning the loaded data
 import numpy as np
+
+#Note: Pandas is also required in some cases (but not critical)
+
+
+#Local
+#-------------------------
 
 #Note apparently pylint doesn't like this because it is from a dll (.pyd file)
 #https://stackoverflow.com/questions/28437071/pylint-1-4-reports-e1101no-member-on-all-c-extensions
 import struct
-
 p_size = struct.calcsize("P")
 if p_size == 4:
     from adi._adi_cffi2 import ffi, lib
@@ -28,13 +46,13 @@ r"""
     plt.show()
 """
 
-def read_file(file_path):
+def read_file(file_path) -> File:
     """
     This is the preferred entry point for working with this module.
     """
     return File(file_path)
 
-def print_object(obj):
+def print_object(obj,keys_hide=[]):
     """
     Goal is to eventually mimic Matlab's default display behavior for objects
     Example output from Matlab
@@ -55,7 +73,7 @@ def print_object(obj):
 
     dict_local = obj.__dict__
 
-    key_names = [k for k in dict_local]
+    key_names = [k for k in dict_local if k not in keys_hide]
 
     try:
         # TODO: Also include __bases__
@@ -130,11 +148,201 @@ def print_object(obj):
 
         value_strings.append(temp_str)
 
-    final_str = ''
+    class_name = obj.__class__.__name__
+    final_str = class_name + '\n' + '-' * len(class_name) + '\n'
     for cur_lead_str, cur_value in zip(lead_strings, value_strings):
         final_str += (cur_lead_str + cur_value + '\n')
-
     return final_str
+
+@dataclass
+class CommentCollection:
+    comments: list[Comment]
+
+    def to_dataframe(self) -> pd.DataFrame:
+        import pandas as pd
+
+        return pd.DataFrame([
+            {
+                "record_id": c.record_id,
+                "text": c.text,
+                "id": c.id,
+                "channel": c.channel,
+                "time": c.time,
+                "tick_position": c.tick_position,
+            }
+            for c in self.comments
+        ])
+    
+    """
+    def get_comment_pairs(self, start, stop, n_max=None, 
+                          record_split: Literal["allow", "skip", "error"] = "skip"):
+        
+        #.record_id1
+        #.record_id2
+        #.id1
+        #.id2
+        #.start_time
+        #.stop_time
+        #.start_comment
+        #.stop_comment
+        #.duration
+        pass
+    """
+    
+    def get_comment_pairs(self, start, stop, n_max=None, 
+                          record_split: Literal["allow", "skip", "error"] = "skip",
+                          unmatched: Literal["ignore", "warn", "error"] = "ignore"):
+        """
+        Find sequential pairs of comments whose text matches `start` and
+        `stop` (case-insensitive partial match).
+
+        Parameters
+        ----------
+        start : str
+            Substring to match for the opening comment.
+        stop : str
+            Substring to match for the closing comment.
+        n_max : int, optional
+            Maximum number of pairs to return.
+        allow_record_split : bool, optional
+            If False (default), both comments must be in the same record.
+            If True, a stop comment in a later record can close a start
+            comment from an earlier record (duration will be None for
+            cross-record pairs since times are record-relative).
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: record_id1, record_id2, id1, id2, start_time,
+            stop_time, start_comment, stop_comment, duration
+        """
+        
+        """
+        Implementation details:
+            - comments may not be sorted (I think)
+            - timing is difficult across records, set to None for now
+            (eventually we could add a better absolute time field
+        """
+        
+        import pandas as pd
+
+        start_lower = start.lower()
+        stop_lower = stop.lower()
+
+        starts = sorted(
+            [c for c in self.comments if start_lower in c.text.lower()],
+            key=lambda c: (c.record_id, c.time),
+        )
+        stops = sorted(
+            [c for c in self.comments if stop_lower in c.text.lower()],
+            key=lambda c: (c.record_id, c.time),
+        )
+
+        pairs = []
+        used_stop_ids: set = set()
+        
+        restrict_to_record = record_split == "skip"
+
+        #This works although part of me would prefer a linear search. That 
+        #would require merging the starts and stops in order
+        for s in starts:
+            for candidate in stops:
+                #Ensures we don't match either:
+                #1) A stop comment that was already used
+                #2) The same candidate
+                if candidate.id in used_stop_ids or candidate.id == s.id:
+                    continue
+
+                if restrict_to_record:
+                    is_after = (
+                        candidate.record_id == s.record_id
+                        and candidate.time >= s.time
+                    )
+                else:
+                    is_after = (candidate.record_id, candidate.time) >= (
+                        s.record_id,
+                        s.time,
+                    )
+
+                if is_after:
+                    pairs.append((s, candidate))
+                    used_stop_ids.add(candidate.id)
+                    break
+
+            if n_max is not None and len(pairs) >= n_max:
+                break
+
+        # Enforce the "error" mode after pairing
+        #   - this shows all failures. If in the above loop we could
+        #     fail faster ...
+        if record_split == "error":
+            cross_record = [
+                (c1, c2) for c1, c2 in pairs
+                if c1.record_id != c2.record_id
+            ]
+            if cross_record:
+                details = ", ".join(
+                    f"comment {c1.id} (record {c1.record_id}) → "
+                    f"comment {c2.id} (record {c2.record_id})"
+                    for c1, c2 in cross_record
+                )
+                raise ValueError(
+                    f"Found {len(cross_record)} cross-record pair(s): {details}")
+
+        # Detect unmatched comments
+        #------------------------------------------
+        if unmatched != "ignore":
+            paired_start_ids = {c1.id for c1, c2 in pairs}
+            unmatched_starts = [s for s in starts if s.id not in paired_start_ids]
+            unmatched_stops = [s for s in stops if s.id not in used_stop_ids]
+            
+            if unmatched_starts or unmatched_stops:
+                parts = []
+                if unmatched_starts:
+                    details = ", ".join(
+                        f"id {c.id} (record {c.record_id}, t={c.time:.3f})"
+                        for c in unmatched_starts)
+                    parts.append(f"{len(unmatched_starts)} unmatched start(s): {details}")
+                if unmatched_stops:
+                    details = ", ".join(
+                        f"id {c.id} (record {c.record_id}, t={c.time:.3f})"
+                        for c in unmatched_stops)
+                    parts.append(f"{len(unmatched_stops)} unmatched stop(s): {details}")
+                
+                msg = "; ".join(parts)
+                
+                if unmatched == "error":
+                    raise ValueError(msg)
+                else:
+                    import warnings
+                    warnings.warn(msg)
+
+
+        #TODO: Include a record split flag, and compute duration always
+        #using absolute times
+        rows = []
+        for c1, c2 in pairs:
+            same_record = c1.record_id == c2.record_id
+            rows.append(
+                {
+                    "record_id1": c1.record_id,
+                    "record_id2": c2.record_id,
+                    "id1": c1.id,
+                    "id2": c2.id,
+                    "start_time": c1.time,
+                    "stop_time": c2.time,
+                    "start_comment": c1.text,
+                    "stop_comment": c2.text,
+                    "duration": c2.time - c1.time if same_record else None,
+                }
+            )
+
+        return pd.DataFrame(rows)
+
+    def __repr__(self):
+        return print_object(self)
+    
+    
 
 class Comment():
     
@@ -158,20 +366,23 @@ class Comment():
         Seconds since start of recording (based on tick position)
     
     """
-    def __init__(self,text,tick_pos,channel_id,comment_id):
+    def __init__(self,text,tick_pos,channel_id,comment_id) -> None:
         self.text = text
         self.tick_position = tick_pos
+        #This is a typo (I believe) :/
         self.channel_ = channel_id
+        self.channel = self.channel_
         self.id = comment_id
         
         
-    def _add_info(self,tick_dt):
+    def _add_info(self,record_id,tick_dt) -> None:
+        self.record_id  = record_id
         self.tick_dt = tick_dt
         self.time = self.tick_position*self.tick_dt
         
         
     def __repr__(self):
-        return print_object(self)
+        return print_object(self,keys_hide=['channel_'])
 
 
 class Channel():
@@ -210,8 +421,9 @@ class Channel():
     
     """
     
-    def __init__(self,h,channel_id,records):
+    def __init__(self,h,channel_id,records,h_file):
         self.h = h
+        self.h_file = h_file
         self.id = channel_id #1 based
         self.n_records = len(records)
         self.tick_dt = [x.tick_dt for x in records]
@@ -224,29 +436,59 @@ class Channel():
         self.dt = [SDK.get_sample_period(self.h,x+1,self.id) for x in range(self.n_records)]
         self.fs = [1/x for x in self.dt]
         self.max_time = [(self.n_samples[x]-1)*self.dt[x] if self.n_samples[x] > 0 else None for x in range(self.n_records)]
+
+    @overload
+    def get_data(self, record_id: int, *, return_time: Literal[False] = ..., **kw) -> np.ndarray: ...
+    
+    @overload
+    def get_data(self, record_id: int, *, return_time: Literal[True], **kw) -> tuple[np.ndarray, np.ndarray]: ...
+    
+    def get_data(self, record_id: int, 
+                 start_sample: int | None = None,
+                 stop_sample: int | None = None,
+                 sample_range: Sequence[int] | None = None,
+                 start_time: float | None = None,
+                 stop_time: float | None = None,
+                 time_range: Sequence[float] | None = None,
+                 start_comment: int | None = None,
+                 stop_comment: int | None = None,
+                 comment_range: Sequence[int] | None = None,
+                 return_time: bool = False) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         
-    def get_data(self, record_id, start_sample=None, stop_sample=None,
-                 start_time=None, stop_time=None, return_time=False):
         """
         Calling Forms
         -------------
-        data = chan.get_data(record_id,**options)
+        data = chan.get_data(record_id, **options)
         
-        time,data = chan.get_data(record_id,return_time=True,**options)
+        time, data = chan.get_data(record_id, return_time=True, **options)
         
         
         Parameters
         ----------
         record_id : numeric
-            Which record to retrieve data from.
+            Which record to retrieve data from. This is ignored if using
+            comment IDs
         start_sample : numeric, optional
-            Default 1. Ignored if start_time is provided.
+            Default 1. Ignored if start_time or start_comment is provided.
         stop_sample : numeric, optional
-            Default last sample. Ignored if stop_time is provided.
+            Default last sample. Ignored if stop_time or stop_comment is provided.
+        sample_range : [start, stop], optional
+            Convenience alternative to start_sample/stop_sample. Unpacks into
+            those parameters, so the same override rules apply.
         start_time : numeric, optional
             Start time in seconds. Overrides start_sample if provided.
         stop_time : numeric, optional
             Stop time in seconds. Overrides stop_sample if provided.
+        time_range : [start, stop], optional
+            Convenience alternative to start_time/stop_time. Unpacks into
+            those parameters, so the same override rules apply.
+        start_comment : numeric, optional
+            Comment ID. Overrides start_time and start_sample if provided.
+        stop_comment : numeric, optional
+            Comment ID. Overrides stop_time and stop_sample if provided.
+        comment_range : [start, stop], optional
+            Convenience alternative to start_comment/stop_comment. Unpacks
+            into those parameters, so the same override rules apply.
         return_time : boolean, optional
             If True, returns a tuple of (time_array, data_array).
             The default is False.
@@ -254,26 +496,69 @@ class Channel():
             
         Returns
         -------
-        numpy array, or tuple of (numpy array, numpy array) if return_time=True   
+        numpy array, or tuple of (numpy array, numpy array) if return_time=True
         
-        Improvements
-        ------------
-        1. Consider adding sample_range = [start,stop] and time_range = [start,stop]
+        
+        Priority
+        --------
+        comment > time > sample. Ranges unpack into their respective 
+        start/stop before the cascade runs.
         
         """
         
         dt = self.dt[record_id - 1]
     
-        #Start sample determination
+        # Unpack ranges into individual start/stop
+        #------------------------------------------
+        if comment_range is not None:
+            start_comment, stop_comment = comment_range
+            
+        if time_range is not None:
+            start_time, stop_time = time_range
+            
+        if sample_range is not None:
+            start_sample, stop_sample = sample_range
+    
+        # Comment → time resolution
+        #------------------------------------------
+        if start_comment is not None or stop_comment is not None:
+            all_comments = self.h_file.get_comments()
+            comments_by_id = {c.id: c for c in all_comments}
+            
+            if start_comment is not None:
+                if start_comment not in comments_by_id:
+                    raise ValueError(f"No comment found with id {start_comment}")
+                c1 = comments_by_id[start_comment]
+                start_time = c1.time
+                start_record = c1.record_id
+                
+            if stop_comment is not None:
+                if stop_comment not in comments_by_id:
+                    raise ValueError(f"No comment found with id {stop_comment}")
+                c2 = comments_by_id[stop_comment]    
+                stop_time = c2.time
+                stop_record = c2.record_id
+                
+                
+            if start_comment is not None and stop_comment is not None:
+                if start_record != stop_record:
+                    raise ValueError(
+                        f"start_comment (record {start_record}) and "
+                        f"stop_comment (record {stop_record}) are in different records")
+                record_id = start_record
+            elif start_comment is not None:
+                record_id = start_record
+            else:
+                record_id = stop_record
+            
+    
+        # Time → sample resolution
         #------------------------------------------
         if start_time is not None:
-            # Convert to 1-based sample index
             start_sample = int(start_time / dt) + 1  
         elif start_sample is None:
             start_sample = 1
         
-        #Stop sample determination
-        #------------------------------------------
         if stop_time is not None:
             stop_sample = int(stop_time / dt) + 1
         elif stop_sample is None:
@@ -283,18 +568,17 @@ class Channel():
         # Validate computed sample bounds
         #------------------------------------------
         if start_sample < 1:
-            raise Exception('Computed start_sample from start_time is out of range')
+            raise Exception('Computed start_sample is out of range')
         if stop_sample > self.n_samples[record_id - 1]:
-            raise Exception('Computed stop_sample from stop_time is out of range')
+            raise Exception('Computed stop_sample is out of range')
     
         data = SDK.get_channel_data(self.h, record_id, self.id, start_sample, stop_sample)
     
         if return_time:
-            time = np.arange(start_sample - 1, stop_sample) * dt  # 0-based time in seconds
+            time = np.arange(start_sample - 1, stop_sample) * dt
             return time, data
         else:    
-            return data
-        
+            return data        
 
     def __repr__(self):
         return print_object(self)         
@@ -390,8 +674,12 @@ class Record():
         self.comments = SDK.get_all_comments(self.h,record_id)
         
         #JAH: Why did I do this as a later step?
+        #
+        #It looks like because everything else is needed by the SDK. Rather
+        #than returning something in a more raw form, and then creating the
+        #object, the SDK returns the object, which is missing some info
         for c in self.comments:
-            c._add_info(self.tick_dt)
+            c._add_info(self.id,self.tick_dt)
             
             
         self.record_time = SDK.get_record_time_info(self.h,record_id,self.tick_dt) 
@@ -438,10 +726,40 @@ class File():
         
         self.records = [Record(self.h,x+1) for x in range(self.n_records)]
         
-        self.channels = [Channel(self.h,x+1,self.records) for x in range(self.n_channels)]
+        self.channels = [Channel(self.h,x+1,self.records,self) for x in range(self.n_channels)]
         self.channel_names = [x.name for x in self.channels]
+    
         
-    def get_channel_by_name(self,chan_name,case_sensitive=False,partial_match=True):
+    @overload
+    def get_comments(self, return_as: Literal["list"] = ...) -> list[Comment]: ...
+    
+    @overload
+    def get_comments(self, return_as: Literal["table"]) -> pd.DataFrame: ...
+    
+    @overload
+    def get_comments(self, return_as: Literal["object"]) -> CommentCollection: ...
+    
+    def get_comments(
+        self,
+        return_as: Literal["list", "table", "object"] = "list",
+    ) -> list[Comment] | pd.DataFrame | CommentCollection:
+        """
+        Eventually we may expand this with time filters or word filters etc.
+        """
+        comments: list[Comment] = []
+        for record in self.records:
+            comments.extend(record.comments)
+    
+        if return_as == "list":
+            return comments
+        if return_as == "object":
+            return CommentCollection(comments)
+        if return_as == "table":
+            return CommentCollection(comments).to_dataframe()
+    
+        raise ValueError(f"Unknown return_as value: {return_as!r}")
+        
+    def get_channel_by_name(self,chan_name,case_sensitive=False,partial_match=True) -> Channel:
         """
 
         Parameters
