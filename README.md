@@ -64,7 +64,7 @@ plt.show()
 ```
 
 Here's an example of working with comment data.
-```
+```python
 import adi
 
 fp = r"D:\Data\Duke\PGE2_2017\140414_C_01_pelvic and hypogastric recording PGE2 model .adicht"
