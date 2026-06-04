@@ -62,6 +62,41 @@ plt.show()
 
 ```
 
+Here's an example of working with comment data.
+```
+import adi
+
+fp = r"D:\Data\Duke\PGE2_2017\140414_C_01_pelvic and hypogastric recording PGE2 model .adicht"
+
+f = adi.read_file(fp)
+
+#default is a list, could also return as a dataframe
+comments = f.get_comments(return_as='object')
+
+#You can throw a warning or an error (or ignore) unmatched pairs
+# - 'ignore'
+# - 'error'
+# - 'warn'
+#You can skip, allow, or throw an error for matches spanning records
+# - 'skip'
+# - 'allow'
+# - 'error'
+pairs = comments.get_comment_pairs("start pump","stop pump",unmatched='ignore',record_split="skip")
+
+p_chan = adi.get_channel_by_name('pres')
+id_pair = [pairs.id1[0],pairs.id2[0]]
+#Passing in a pair of IDs for comment_range is sufficient to identify
+#the time range. Note they currently need to be in the same record_id
+#
+#The record_id input is ignored, so I just pass in -1
+time,data = p_chan.get_data(-1, comment_range=id_pair,return_time=True)
+
+import matplotlib.pyplot as plt
+plt.plot(time,data)
+plt.show()
+
+```
+
 
 
 ## Data Model ##

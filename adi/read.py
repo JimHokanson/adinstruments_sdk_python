@@ -157,6 +157,7 @@ def print_object(obj,keys_hide=[]):
 @dataclass
 class CommentCollection:
     comments: list[Comment]
+    record_times : list[RecordTime]
 
     def to_dataframe(self) -> pd.DataFrame:
         import pandas as pd
@@ -190,8 +191,8 @@ class CommentCollection:
     """
     
     def get_comment_pairs(self, start, stop, n_max=None, 
-                          record_split: Literal["allow", "skip", "error"] = "skip",
-                          unmatched: Literal["ignore", "warn", "error"] = "ignore"):
+                          record_split: Literal["allow", "skip", "error"] = "error",
+                          unmatched: Literal["ignore", "warn", "error"] = "error"):
         """
         Find sequential pairs of comments whose text matches `start` and
         `stop` (case-insensitive partial match).
@@ -204,77 +205,90 @@ class CommentCollection:
             Substring to match for the closing comment.
         n_max : int, optional
             Maximum number of pairs to return.
-        allow_record_split : bool, optional
-            If False (default), both comments must be in the same record.
-            If True, a stop comment in a later record can close a start
-            comment from an earlier record (duration will be None for
-            cross-record pairs since times are record-relative).
+        record_split : {"allow", "skip", "error"}, default "error"
+            How to handle pairs that span different records.
+            - "skip": both comments must be in the same record; a record
+              boundary orphans any open start.
+            - "allow": a stop comment in a later record can close a start
+              from an earlier record (duration will be None for
+              cross-record pairs since times are record-relative).
+            - "error": raise ValueError if any cross-record pairs are found.
+        unmatched : {"ignore", "warn", "error"}, default "error"
+            What to do when start or stop comments have no partner.
+            - "ignore": silently discard them.
+            - "warn": emit a warnings.warn with details.
+            - "error": raise ValueError with details.
 
         Returns
         -------
         pd.DataFrame
-            Columns: record_id1, record_id2, id1, id2, start_time,
+            Columns: rid1, rid2, id1, id2, start_time,
             stop_time, start_comment, stop_comment, duration
+            - rid1, rid2 - records IDs (shortened for table display)
+            - duration (numeric, in seconds)
+            
         """
         
         """
         Implementation details:
-            - comments may not be sorted (I think)
-            - timing is difficult across records, set to None for now
-            (eventually we could add a better absolute time field
+            - comments are merged into a single timeline and walked 
+              linearly so that a second start before a stop orphans the 
+              first start (rather than letting an early orphan steal a 
+              later pair's stop)
         """
         
         import pandas as pd
 
         start_lower = start.lower()
         stop_lower = stop.lower()
-
-        starts = sorted(
-            [c for c in self.comments if start_lower in c.text.lower()],
-            key=lambda c: (c.record_id, c.time),
-        )
-        stops = sorted(
-            [c for c in self.comments if stop_lower in c.text.lower()],
-            key=lambda c: (c.record_id, c.time),
-        )
-
-        pairs = []
-        used_stop_ids: set = set()
-        
         restrict_to_record = record_split == "skip"
 
-        #This works although part of me would prefer a linear search. That 
-        #would require merging the starts and stops in order
-        for s in starts:
-            for candidate in stops:
-                #Ensures we don't match either:
-                #1) A stop comment that was already used
-                #2) The same candidate
-                if candidate.id in used_stop_ids or candidate.id == s.id:
-                    continue
+        # Merge and tag all matching comments
+        tagged = []
+        for c in self.comments:
+            text_lower = c.text.lower()
+            is_start = start_lower in text_lower
+            is_stop = stop_lower in text_lower
+            if is_start or is_stop:
+                tagged.append((c, is_start, is_stop))
 
-                if restrict_to_record:
-                    is_after = (
-                        candidate.record_id == s.record_id
-                        and candidate.time >= s.time
-                    )
-                else:
-                    is_after = (candidate.record_id, candidate.time) >= (
-                        s.record_id,
-                        s.time,
-                    )
+        tagged.sort(key=lambda x: (x[0].record_id, x[0].time))
 
-                if is_after:
-                    pairs.append((s, candidate))
-                    used_stop_ids.add(candidate.id)
+        # Linear scan: walk the timeline and pair start/stop sequentially.
+        # If a new start appears before the current start is closed, the
+        # current start is orphaned.
+        pairs = []
+        orphan_starts = []
+        orphan_stops = []
+        current_start = None
+
+        for c, is_start, is_stop in tagged:
+            # A record boundary orphans any open start when restricted
+            if restrict_to_record and current_start is not None:
+                if c.record_id != current_start.record_id:
+                    orphan_starts.append(current_start)
+                    current_start = None
+
+            if is_stop and current_start is not None:
+                # Close the pair
+                pairs.append((current_start, c))
+                current_start = None
+                if n_max is not None and len(pairs) >= n_max:
                     break
+            elif is_start:
+                # A new start orphans any unclosed previous start
+                if current_start is not None:
+                    orphan_starts.append(current_start)
+                current_start = c
+            else:
+                # is_stop with no open start
+                orphan_stops.append(c)
 
-            if n_max is not None and len(pairs) >= n_max:
-                break
+        # Anything still open at the end is orphaned
+        if current_start is not None:
+            orphan_starts.append(current_start)
 
-        # Enforce the "error" mode after pairing
-        #   - this shows all failures. If in the above loop we could
-        #     fail faster ...
+        # Enforce the "error" mode for cross-record pairs
         if record_split == "error":
             cross_record = [
                 (c1, c2) for c1, c2 in pairs
@@ -289,51 +303,60 @@ class CommentCollection:
                 raise ValueError(
                     f"Found {len(cross_record)} cross-record pair(s): {details}")
 
-        # Detect unmatched comments
-        #------------------------------------------
-        if unmatched != "ignore":
-            paired_start_ids = {c1.id for c1, c2 in pairs}
-            unmatched_starts = [s for s in starts if s.id not in paired_start_ids]
-            unmatched_stops = [s for s in stops if s.id not in used_stop_ids]
-            
-            if unmatched_starts or unmatched_stops:
-                parts = []
-                if unmatched_starts:
-                    details = ", ".join(
-                        f"id {c.id} (record {c.record_id}, t={c.time:.3f})"
-                        for c in unmatched_starts)
-                    parts.append(f"{len(unmatched_starts)} unmatched start(s): {details}")
-                if unmatched_stops:
-                    details = ", ".join(
-                        f"id {c.id} (record {c.record_id}, t={c.time:.3f})"
-                        for c in unmatched_stops)
-                    parts.append(f"{len(unmatched_stops)} unmatched stop(s): {details}")
-                
-                msg = "; ".join(parts)
-                
-                if unmatched == "error":
-                    raise ValueError(msg)
-                else:
-                    import warnings
-                    warnings.warn(msg)
+        # Handle unmatched comments
+        if unmatched != "ignore" and (orphan_starts or orphan_stops):
+            parts = []
+            if orphan_starts:
+                details = ", ".join(
+                    f"id {c.id} (record {c.record_id}, t={c.time:.3f})"
+                    for c in orphan_starts)
+                parts.append(f"{len(orphan_starts)} unmatched start(s): {details}")
+            if orphan_stops:
+                details = ", ".join(
+                    f"id {c.id} (record {c.record_id}, t={c.time:.3f})"
+                    for c in orphan_stops)
+                parts.append(f"{len(orphan_stops)} unmatched stop(s): {details}")
 
+            msg = "; ".join(parts)
 
-        #TODO: Include a record split flag, and compute duration always
-        #using absolute times
+            if unmatched == "error":
+                raise ValueError(msg)
+            else:
+                import warnings
+                warnings.warn(msg)
+
+        # Build the output DataFrame
         rows = []
         for c1, c2 in pairs:
             same_record = c1.record_id == c2.record_id
+            if same_record:
+                duration = c2.time - c1.time
+            else:
+                r1 = self.record_times[c1.record_id-1]
+                r2 = self.record_times[c2.record_id-1]
+                #start2 = r2.rec_datetime
+                #stop1 = r1.rec_stop_datetime
+                c2_time_datetime = r2.rec_datetime + timedelta(seconds=c2.time)
+                c1_time_datetime = r1.rec_datetime + timedelta(seconds=c1.time)
+                duration = (c2_time_datetime - c1_time_datetime).total_seconds()
+                
+                #elapsed time = 
+                # duration - c1.time
+                #+ time between records ()
+                #duration = 1
+                
+                
             rows.append(
                 {
-                    "record_id1": c1.record_id,
-                    "record_id2": c2.record_id,
+                    "rid1": c1.record_id,
+                    "rid2": c2.record_id,
                     "id1": c1.id,
                     "id2": c2.id,
                     "start_time": c1.time,
                     "stop_time": c2.time,
                     "start_comment": c1.text,
                     "stop_comment": c2.text,
-                    "duration": c2.time - c1.time if same_record else None,
+                    "duration": duration,
                 }
             )
 
@@ -504,6 +527,16 @@ class Channel():
         comment > time > sample. Ranges unpack into their respective 
         start/stop before the cascade runs.
         
+        Improvements
+        ------------
+        1. Currently requesting across two different records (with comments)
+        throws an error. We could eventually support multiple records
+        and either:
+            - place NaNs for missing data
+            - interpolate
+            ASSUMING: same sampling rate, gets more confusing when fs
+            changes between records
+        
         """
         
         dt = self.dt[record_id - 1]
@@ -542,6 +575,8 @@ class Channel():
                 
             if start_comment is not None and stop_comment is not None:
                 if start_record != stop_record:
+                    #Eventually we could allow interpolation but 
+                    #that is not yet implemented
                     raise ValueError(
                         f"start_comment (record {start_record}) and "
                         f"stop_comment (record {stop_record}) are in different records")
@@ -602,6 +637,7 @@ class RecordTime():
     rec_datetime : datetime
         I believe this is the actual time when the first sample was collected
     rec_datestr : string
+    rec_stop_datetime : datetime
         
     
     It is possible to trigger data collection before or after the trigger signal.
@@ -625,6 +661,9 @@ class RecordTime():
                 
         #+ve - trigger before block
         #-ve - trigger after block
+    
+    def add_info(self,duration):
+        self.rec_stop_datetime = self.rec_datetime + timedelta(seconds=duration)
     
     def __repr__(self):
         return print_object(self)   
@@ -670,6 +709,7 @@ class Record():
         #Hard coded in "first channel" => 1
         self.tick_dt = SDK.get_tick_period(self.h,record_id,1)
         self.tick_fs = 1.0/self.tick_dt
+        self.duration = self.tick_dt*self.n_ticks
         
         self.comments = SDK.get_all_comments(self.h,record_id)
         
@@ -680,9 +720,10 @@ class Record():
         #object, the SDK returns the object, which is missing some info
         for c in self.comments:
             c._add_info(self.id,self.tick_dt)
-            
-            
+               
         self.record_time = SDK.get_record_time_info(self.h,record_id,self.tick_dt) 
+        
+        self.record_time.add_info(self.duration)
 
     def __repr__(self):
         return print_object(self)            
@@ -728,8 +769,7 @@ class File():
         
         self.channels = [Channel(self.h,x+1,self.records,self) for x in range(self.n_channels)]
         self.channel_names = [x.name for x in self.channels]
-    
-        
+            
     @overload
     def get_comments(self, return_as: Literal["list"] = ...) -> list[Comment]: ...
     
@@ -744,18 +784,48 @@ class File():
         return_as: Literal["list", "table", "object"] = "list",
     ) -> list[Comment] | pd.DataFrame | CommentCollection:
         """
-        Eventually we may expand this with time filters or word filters etc.
+        Retrieve all comments associated with this file.
+
+        Parameters
+        ----------
+        return_as : {"list", "table", "object"}, optional
+            The format in which to return the comments (default is "list").
+
+            - "list": a plain list of Comment objects.
+            - "table": a pandas DataFrame with one row per comment,
+              convenient for analysis or export.
+            - "object": a CommentCollection wrapping the comments, with
+              helper methods for filtering.
+
+        Returns
+        -------
+        list of Comment or pandas.DataFrame or CommentCollection
+            The comments in the requested format. The concrete type depends
+            on the value of return_as:
+
+            - list of Comment when return_as="list"
+            - pandas.DataFrame when return_as="table"
+            - CommentCollection when return_as="object"
+
+        Improvements
+        ------------
+        1. Expand with ID filtering - return as requested
+        2. Expand with word filtering
         """
+        
         comments: list[Comment] = []
+        record_times: list[RecordTime] = []
+           
         for record in self.records:
             comments.extend(record.comments)
+            record_times.append(record.record_time)
     
         if return_as == "list":
             return comments
         if return_as == "object":
-            return CommentCollection(comments)
+            return CommentCollection(comments,record_times)
         if return_as == "table":
-            return CommentCollection(comments).to_dataframe()
+            return CommentCollection(comments,record_times).to_dataframe()
     
         raise ValueError(f"Unknown return_as value: {return_as!r}")
         
