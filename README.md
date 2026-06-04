@@ -20,8 +20,9 @@ My ability to work on this code was supported, in part, by a grant from the NIH 
 
 - [cffi](https://cffi.readthedocs.io/en/latest/)
 - [NumPy](https://numpy.org/)
-- Python 3.6-3.14
-
+- Python 3.7-3.14
+  - might be able to do 3.6 but requires future annotations 
+- Pandas - optional
 
 ## Demo code ##
 
