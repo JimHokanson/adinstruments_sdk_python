@@ -1124,10 +1124,25 @@ class SDK():
     def get_n_channels(h):
         n_channels = ffi.new("long *")
         result = lib.ADI_GetNumberOfChannels(h[0],n_channels)
-        if result == 0:
-            return n_channels[0]
-        else:
+        if result != 0:
             raise Exception('Error getting # of channels')
+
+        # ADI_GetNumberOfChannels can under-report the true channel count
+        # for some files. Probe subsequent channel ids via ADI_GetChannelName
+        # (which is authoritative) to pick up any channels it missed.
+        count = n_channels[0]
+        probe_id = count + 1
+        while True:
+            text = ffi.new("wchar_t[1000]")
+            text_length = ffi.new("long *")
+            probe_result = lib.ADI_GetChannelName(h[0],probe_id-1,text,999,text_length)
+            if probe_result == 0 or probe_result == 1:
+                count = probe_id
+                probe_id += 1
+            else:
+                break
+
+        return count
         
     @staticmethod    
     def close_file(h):
